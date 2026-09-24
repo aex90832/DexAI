@@ -39,7 +39,6 @@ you already run. Skip the ones that don't apply.
 21. [Maintenance and upgrading](#maintenance-and-upgrading)
 22. [Caveats for shared or public deployments](#caveats-for-shared-or-public-deployments)
 23. [File manifest](#file-manifest)
-24. [Known gaps](#known-gaps)
 
 ---
 
@@ -2307,68 +2306,6 @@ library.kiwix.org and let them build their own database.
 | `poke_capture_*.png` | `/mnt/Apps/pokedex/sprites/previews/` | Pokemon HOME preview art (Step 2b, optional) |
 
 ---
-
-## Known gaps
-
-Roughly in priority order:
-
-- **Cross-article aggregation.** "Which Pokémon appeared in the most episodes?"
-  requires counting across hundreds of articles. Retrieval returns chunks, not
-  aggregates. Fix is to precompute specific aggregates during ingest.
-- **Showdown alias shorthand.** Community nicknames like `ttar` and `lando-t`
-  are not in the alias table, which is built from ZIM redirects plus dex names.
-  Showdown publishes its own alias map; wiring it in would make casual phrasing
-  resolve more reliably.
-- **Set quality judgement.** `review_team` checks structure only. It cannot tell
-  you an EV spread is wrong or a set is outclassed.
-- **Model narration drifts from tool results.** The most persistent issue in
-  practice. Tool-sourced numbers are reliable; the explanatory prose the model
-  wraps around them is not, and it will state ability effects, type
-  interactions, and move properties from memory while the correct data sits in
-  its own tool results. The system prompt's "mechanical claims must be sourced"
-  section cuts this down substantially but does not eliminate it. Treat numbers
-  as trustworthy and narrative framing as the model's own.
-- **Bulbapedia infobox tables come out mangled.** The parser ignores `colspan`
-  and `rowspan`, so wide infoboxes produce misaligned columns. The text stays
-  searchable; it just reads badly.
-- **Recency.** The ZIM is a snapshot. The system should report its own data date so
-  it can say "as of my March snapshot."
-- **Image understanding.** TCG art and screenshots are in the ZIM but unused.
-  Species sprites and artwork are used, if configured (Step 2b) — Pokemon HOME
-  icons and previews, including shiny variants and known alternate forms.
-- **Sprite alternate-form labeling is incomplete.** Matching a HOME sprite to its
-  specific alternate form (which Mega, which regional variant) depends on
-  confidently matching it against `@pkmn/dex`'s own forme ordering — this works
-  well for common cases but not every cosmetic variant resolves. `ingest.py
-  --sprites-only`'s summary output reports how many alternate-form sprites were
-  confidently labeled versus not; an unlabeled sprite still displays, it's just
-  not tagged with which specific forme it is.
-- **Card classification for a genuine same-size team alternative isn't fully
-  reliable.** When a chat response discusses a team, cards are split into the
-  real team, automatic in-battle forms of a team member (e.g. Aegislash's
-  Shield/Blade), and everything else mentioned. That split is inferred from the
-  sequence of tool calls in the conversation, not from anything the model
-  explicitly labels as "this is my final answer." If the model checks two
-  equally-complete team variants back to back — the real team, then a genuine
-  alternative of the same size — cards default to whichever was checked *last*,
-  which may not be the one the model's own text ends up recommending. No known
-  fix without a stronger signal from the model about which one it actually
-  settled on.
-- **Item categorization covers two families, not every family.** `query_items`
-  can filter by is_choice, is_berry, is_mega_stone, or category (type-boosting
-  and stat-boosting — the only two with a reliably-parseable source table).
-  Status orbs, weather rocks, terrain seeds, gems, plates, and one-off items
-  like Leftovers have no clean category field at all — most of what makes an
-  item competitively meaningful is executable effect code, not inspectable
-  data. Free-text search over each item's short_desc covers this long tail instead,
-  and works well for it, but it's search, not a browsable category the way
-  type-boosting items are.
-- **Battle simulation.** `@pkmn/sim` can run full battles, not just validate teams.
-  `compare_teams` covers the structural side; actual simulation would add an
-  empirical win rate. Worth knowing before building it: the bundled AI plays close
-  to randomly, so it measures "advantage under unskilled play" — a real signal
-  about structure, and emphatically not a prediction for competent players. Only
-  useful if labelled that precisely.
 
 ### On win probabilities
 
