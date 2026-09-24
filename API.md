@@ -1,4 +1,4 @@
-# Pokedex AI — API Reference
+# DexAI — API Reference
 
 Every endpoint `pokedex-api` exposes, with request fields and real response
 shapes. For deployment instructions, see `pokedex-ai-README.md`. This document
