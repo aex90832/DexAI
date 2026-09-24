@@ -1,0 +1,30 @@
+# Pokedex AI — Python dependencies
+#
+# Loose constraints so the first install resolves cleanly. After that first
+# install succeeds, freeze it for reproducibility:
+#
+#   docker exec pokedex-api /app/.venv/bin/pip freeze > /app/requirements.lock.txt
+#
+# and keep the lock file with your backups. Reinstalls only happen when you
+# delete /app/.venv/.installed, so a working set stays working offline.
+
+# --- API server ---
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.34,<1.0
+pydantic>=2.10,<3.0
+
+# --- HTTP client (talks to pokedex-sim, Kiwix, and your model) ---
+httpx>=0.28,<1.0
+
+# --- ZIM reading ---
+libzim>=3.4,<4.0
+
+# --- HTML parsing for Bulbapedia articles ---
+beautifulsoup4>=4.12,<5.0
+lxml>=5.3,<7.0
+
+# --- embeddings (ONNX on CPU — deliberately not torch, which would add ~2GB) ---
+fastembed>=0.5,<1.0
+
+# --- vector math for retrieval ---
+numpy>=1.26,<3.0

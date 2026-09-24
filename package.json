@@ -1,0 +1,17 @@
+{
+  "name": "pokedex-sim",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Showdown team validation, damage calculation, and dex dump for pokedex-api",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@pkmn/data": "latest",
+    "@pkmn/dex": "latest",
+    "@pkmn/sim": "latest",
+    "@smogon/calc": "latest",
+    "express": "^4.21.2"
+  }
+}

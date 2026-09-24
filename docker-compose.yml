@@ -1,0 +1,135 @@
+services:
+  pokedex-api:
+    command: |
+      sh -c "if [ ! -f /app/.venv/.installed ]; then
+               python -m venv /app/.venv &&
+               /app/.venv/bin/pip install -r requirements.txt &&
+               touch /app/.venv/.installed;
+             fi;
+             exec /app/.venv/bin/uvicorn main:app --host 0.0.0.0 --port 8990"
+    container_name: pokedex-api
+    depends_on:
+      - pokedex-sim
+    environment:
+      DB_PATH: /data/pokedex.db
+      EMBED_MODEL: BAAI/bge-small-en-v1.5
+      # GPU embedding is OFF by default here — EMBED_URL is deliberately unset.
+      # A single query embeds in well under a second on CPU; the multi-hour
+      # slowness earlier was from embedding 734,541 chunks in one batch, not
+      # from CPU embedding being slow per-item. Not worth holding a GPU idle
+      # for this.
+      #
+      # To re-embed the wiki after a refresh, start pokedex-embed (see the
+      # commented-out service below) and pass EMBED_URL as a one-off override
+      # on that single command, rather than leaving it set here permanently —
+      # that way pokedex-api can never end up pointed at a server that isn't
+      # running, which is exactly what happened when the embed server was
+      # stopped after the initial build:
+      #
+      #   sudo docker compose up -d pokedex-embed
+      #   sudo docker exec -d -e EMBED_URL=http://pokedex-embed:8993/v1 pokedex-api \
+      #     /app/.venv/bin/python ingest.py --wiki-only
+      #   sudo docker stop pokedex-embed   # once it finishes
+      #
+      # EMBED_URL: http://pokedex-embed:8993/v1
+      # EMBED_API_KEY: ''
+      EMBED_QUERY_THREADS: '4'      # ONNX threads per query, CPU path
+      EMBED_THREADS: '16'           # ONNX threads during a CPU-path bulk ingest
+      GENS: 1,2,3,4,5,6,7,8,9
+      HF_HOME: /data/models
+      HF_HUB_OFFLINE: '1'
+      KIWIX_BOOK: bulbagarden_en_all_maxi_2026-08
+      KIWIX_URL: http://192.168.2.2:30236
+      OFFLINE: '1'
+      OPENAI_API_KEY: ''
+      OPENAI_BASE_URL: http://192.168.2.2:8998/v1
+      OPENAI_MODEL: Qwen3.8-PARO
+      SETS_DIR: /sets
+      SIM_URL: http://pokedex-sim:8991
+      STATS_DIR: /stats
+      TRANSFORMERS_OFFLINE: '1'
+      ZIM_PATH: /zim/bulbagarden_en_all_maxi_2026-08.zim
+      # Pokemon HOME sprites (icons + hero previews), optional. HOME_ICONS_DIR/
+      # HOME_PREVIEWS_DIR are the paths main.py mounts as static routes at
+      # container-startup (/sprites/icons, /sprites/previews below). HOME_SPRITES_URL
+      # is only read by ingest.py's --sprites-only stage, to build the full public
+      # URL baked into each home_sprites row — it MUST already match the mount
+      # paths above, or the stored URLs point at a route that doesn't exist.
+      HOME_ICONS_DIR: /sprites/icons
+      HOME_PREVIEWS_DIR: /sprites/previews
+      HOME_SPRITES_URL: http://192.168.2.2:8990/sprites
+    image: python:3.12-slim
+    ports:
+      - '8990:8990'
+    restart: unless-stopped
+    volumes:
+      - /mnt/Apps/pokedex/api:/app
+      - /mnt/Apps/pokedex/data:/data
+      - /mnt/Apps/pokedex/stats:/stats:ro
+      - /mnt/Apps/pokedex/sets:/sets:ro
+      - /mnt/Apps/pokedex/sprites/icons:/sprites/icons:ro
+      - /mnt/Apps/pokedex/sprites/previews:/sprites/previews:ro
+      - /mnt/Schlesinger-NAS/SchlesingerDrive/Downloads/ZIM:/zim:ro
+    working_dir: /app
+
+  pokedex-sim:
+    command: |
+      sh -c "if [ ! -f node_modules/.installed ]; then
+               npm install --no-audit --no-fund &&
+               touch node_modules/.installed;
+             fi;
+             exec node server.js"
+    container_name: pokedex-sim
+    environment:
+      PORT: '8991'
+    image: node:22-slim
+    ports:
+      - '8991:8991'
+    restart: unless-stopped
+    volumes:
+      - /mnt/Apps/pokedex/sim:/app
+      - /mnt/Apps/pokedex/data:/data
+    working_dir: /app
+
+  # ---------------------------------------------------------------------------
+  # GPU embedding server — INTENTIONALLY NOT RUNNING BY DEFAULT.
+  #
+  # Only needed while actively re-embedding the wiki after a refresh (ingest.py
+  # --wiki-only or --embed-only). Query-time embedding runs on CPU on
+  # pokedex-api instead — see the comment on EMBED_URL above for why, and the
+  # exact start/stop sequence to use this service for a re-embed.
+  #
+  # Uncomment this whole block, run `docker compose up -d pokedex-embed`, do
+  # the re-embed with EMBED_URL passed as a one-off `docker exec -e` override
+  # (not set permanently on pokedex-api), then `docker compose stop
+  # pokedex-embed` when done. Leaving this running permanently just holds a
+  # GPU for a workload that, at query time, is a single short string.
+  # ---------------------------------------------------------------------------
+  # pokedex-embed:
+  #   command: >
+  #     BAAI/bge-small-en-v1.5
+  #     --runner pooling
+  #     --port 8993
+  #     --gpu-memory-utilization 0.10
+  #     --max-model-len 512
+  #   container_name: pokedex-embed
+  #   devices:
+  #     - /dev/kfd
+  #     - /dev/dri
+  #   environment:
+  #     HF_HOME: /data/models
+  #     HIP_VISIBLE_DEVICES: '0'
+  #     RADIANCE_USE_R4D_AR: '0'
+  #     RADIANCE_USE_R4D_AR_QUANT: '0'
+  #     RADIANCE_RUN_BWTEST: '0'
+  #   group_add:
+  #     - video
+  #   image: stilldeadcode/vllm-radiance:0.9.3
+  #   ipc: host
+  #   ports:
+  #     - '8993:8993'
+  #   restart: unless-stopped
+  #   security_opt:
+  #     - seccomp:unconfined
+  #   volumes:
+  #     - /mnt/Apps/pokedex/data:/data
