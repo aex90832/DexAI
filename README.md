@@ -1,4 +1,4 @@
-# Pokédex AI
+# DexAI
 
 A self-hosted Pokémon knowledge base you can talk to. Ask anything — games, anime,
 TCG, competitive battling — and get an answer grounded in real sources instead of
