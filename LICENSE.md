@@ -1,5 +1,5 @@
 DexAI - An Open Source AI Tool
-Copyright (C) 2026 [@aex90832]
+Copyright (C) 2026 @aex90832
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
