@@ -4,6 +4,8 @@ A self-hosted Pokémon knowledge base you can talk to. Ask anything — games, a
 TCG, competitive battling — and get an answer grounded in real sources instead of
 whatever the model half-remembers from the internet.
 
+This started from having my son and nephew asking me tons of questions as they have gotten into competitive Pokemon battles together. It was also an chance to get better ad coding and see what can be done with self hosted AI.
+
 This guide assumes **nothing is set up**. Every step has sub-steps depending on what
 you already run. Skip the ones that don't apply.
 
