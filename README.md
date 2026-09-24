@@ -17,7 +17,7 @@ you already run. Skip the ones that don't apply.
 2. [What it can and cannot answer](#2-what-it-can-and-cannot-answer)
 3. [Data sources](#3-data-sources)
 4. [Build scope — mini, standard, full](#4-build-scope--mini-standard-full)
-4b. [**Embedding tiers — CPU, GPU, and long-context**](#4b-embedding-tiers--cpu-gpu-and-long-context)
+    4b. [**Embedding tiers — CPU, GPU, and long-context**](#4b-embedding-tiers--cpu-gpu-and-long-context)
 5. [Network behavior and offline operation](#5-network-behavior-and-offline-operation)
 6. [Pick your path](#6-pick-your-path)
 7. [Host prerequisites](#7-host-prerequisites)
