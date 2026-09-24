@@ -7,6 +7,8 @@ whatever the model half-remembers from the internet.
 This guide assumes **nothing is set up**. Every step has sub-steps depending on what
 you already run. Skip the ones that don't apply.
 
+**Note:** DexAI is an unofficial, non-commercial fan project. Not affiliated with Nintendo or The Pokémon Company. See [Disclaimer & License](#license--disclaimer) below.
+
 ---
 
 ## Table of contents
@@ -2381,3 +2383,20 @@ refusing.
 outspeeds whom, what the shared weaknesses are, which attacks OHKO what — and the
 response carries a disclaimer the model sees on every call. Matchup questions get
 a qualitative answer built on measured data, not a fabricated statistic.
+
+
+
+---
+
+## License, Disclaimer & Provenance
+
+### License & Attribution
+DexAI is open-source software released under the **GNU Affero General Public License v3.0 (AGPLv3)**. 
+
+Pursuant to Section 7 of the AGPLv3, any modified or network-hosted versions of DexAI must preserve original copyright notices and author attributions:
+* **Project:** DexAI
+* **Original Author:** [Your Name / GitHub Username]
+* **Source Code:** `https://github.com/yourusername/DexAI`
+
+### Non-Affiliation Disclaimer
+DexAI is an unofficial, non-commercial fan-made project. It is not affiliated with, endorsed, sponsored, or approved by Nintendo, Game Freak, or The Pokémon Company. Pokémon and Pokémon character names are registered trademarks of Nintendo.
