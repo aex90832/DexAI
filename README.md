@@ -2388,14 +2388,14 @@ a qualitative answer built on measured data, not a fabricated statistic.
 
 ---
 
-## License, Disclaimer
+## License Disclaimer
 
 ### License & Attribution
 DexAI is open-source software released under the **GNU Affero General Public License v3.0 (AGPLv3)**. 
 
 Pursuant to Section 7 of the AGPLv3, any modified or network-hosted versions of DexAI must preserve original copyright notices and author attributions:
 * **Project:** DexAI
-* **Original Author:** [@aex90832]
+* **Original Author:** @aex90832
 * **Source Code:** `https://github.com/aex90832/DexAI`
 
 ### Non-Affiliation Disclaimer
