@@ -1216,7 +1216,7 @@ calling**. This stack does not provide one.
 
 Your model server must **parse tool calls out of the model's output and return them
 as structured JSON**. A model that "supports function calling" in principle will
-still fail if the server wasn't launched with the right parser.
+still fail if the server wasn't launched with the right parser. I have been using a special Qwen3.8-Flash-Next deployment based on this (https://huggingface.co/tcclaviger/Qwen3.8-Flash-Next-MXFP4-FP8-GPTQ) but any tool calling capable model should work. I also tried the the 27B model. It worked, but is more likely to diverge from the truth and "story tell." 
 
 The failure mode is quiet: the model answers your Pokémon question from its own
 memory, never calls a tool, and sounds perfectly confident. Section 3.6 catches this
