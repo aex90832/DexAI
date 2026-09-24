@@ -1,2 +1,0 @@
-# DexAI
-Self hosted Pokedex
