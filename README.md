@@ -342,8 +342,6 @@ by source when a question is clearly competitive or clearly not.
 
 ### 3.5 — The alias table (how the sources get joined)
 
-This is the least glamorous part of the system and the most load-bearing.
-
 The same Pokémon has a different name in every source:
 
 | Source | Identifier |
