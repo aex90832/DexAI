@@ -5,9 +5,9 @@
 </div>
 
 
-A self-hosted Pokémon knowledge base you can talk to. Ask anything — games, anime,
-TCG, competitive battling — and get an answer grounded in real sources instead of
-whatever the model half-remembers from the internet. Supports desktop and mobile.
+A self-hosted Pokémon knowledge base you can talk to. Ask anything (games, anime,
+TCG, competitive VGC) and it uses authoritative sources instead of
+whatever the model hallucinates. Supports desktop and mobile.
 
 
 **Note:** DexAI is an unofficial, non-commercial fan project. Not affiliated with Nintendo or The Pokémon Company. See [Disclaimer & License](#license--disclaimer) below.
@@ -156,9 +156,9 @@ tool-callable or not.
   for a full level-up learnset and you get it ordered by level, with each move's
   type, power and effect — the actual question someone playing through a game
   has. Requires the generation to be in your build scope (section 4).
-- **Legality.** It runs Showdown's real validator, so "is this team legal" has a
+- **Legality.** It runs Showdown's validator, so "is this team legal" has a
   correct answer, not an opinion.
-- **Damage.** Real calculations, not estimates.
+- **Damage.** Realtime calculations, not estimates.
 - **Metagame description.** What's popular, what checks what, how usage moved
   over the months you've fetched.
 - **Team structure.** Missing roles, shared weaknesses, speed tiers, coverage
@@ -412,9 +412,7 @@ Showdown is run by a simulator that would break if it were wrong.
 
 ## 4. Build scope — mini, standard, full
 
-The wizard asks how many Pokémon generations to index. This is the single
-biggest decision about what the system can answer, and the easiest one to
-regret, so it's worth understanding before you pick.
+The wizard asks how many Pokémon generations to index.
 
 ### Why generations matter
 
@@ -544,7 +542,7 @@ Radeon AI PRO R9700 (32GB, gfx1201).
 all land in the same 28–36/s range. The bottleneck is serial — Python-side
 tokenization and per-item overhead, not compute — so a bigger CPU host doesn't
 help here. If you have any spare GPU, even a modest one, it's almost always
-worth using.
+worth it.
 
 **`gpu-small` vs `gpu-big` is about how much concurrent request-handling
 overhead a card can absorb, not raw VRAM.** For a 33M-parameter model like the
@@ -552,8 +550,8 @@ default, the GPU forward pass is nearly instant — the real cost is the HTTP
 round-trip and JSON handling around it. A bigger card handles more requests
 in flight before that overhead becomes the bottleneck. Pushing `gpu-big`'s
 concurrency past 16 kept helping in testing (GPU utilization was still only
-39%), so if you have real headroom, `EMBED_CONCURRENCY` is worth raising
-further — see the environment variable reference.
+39%), so if you have real headroom, `EMBED_CONCURRENCY` can be raised even
+more — see the environment variable reference.
 
 ### Picking one
 
@@ -827,8 +825,6 @@ rather than trusting the flags.
 
 ### 3.6 — Verify it's actually offline
 
-The honest test is to block egress and use it.
-
 Temporarily deny the containers outbound internet — a firewall rule on the host, or
 pulling the WAN cable — then run the Step 9.3 test prompts. If all five answer
 normally, you're offline-clean.
@@ -867,8 +863,6 @@ The venv and `node_modules` are architecture-specific — stage on the same plat
 nothing tries to reinstall.
 
 ### 3.8 — What you lose by going fully offline
-
-Being honest about the trade:
 
 - **Usage statistics go stale** between manual refreshes. A three-month-old
   metagame picture is usually fine; during a tier shift it isn't.
@@ -1750,8 +1744,8 @@ current code expects and adds anything missing via `ALTER TABLE ADD COLUMN`
 before doing any other work. This means upgrading to a newer version of
 `ingest.py`/`main.py` that adds a new column never requires deleting and
 rebuilding the database from scratch — just copy in the new files and run
-`--dex-only` (or whichever partial stage touches the changed table). One
-real wrinkle worth knowing: `ALTER TABLE ADD COLUMN` always appends the new
+`--dex-only` (or whichever partial stage touches the changed table). Note:
+`ALTER TABLE ADD COLUMN` always appends the new
 column at the table's *physical* end, regardless of where it's written in the
 `CREATE TABLE` text — so any code that writes to that table with a bare
 `INSERT ... VALUES (...)` (positional, no column list) will silently write
@@ -2021,7 +2015,7 @@ Ask these in order. Each exercises a different path:
 | "How does my team do against this one?" | `compare_teams` |
 | "Build me a rain team for gen9ou without Pelipper" | multi-step + `validate_team` |
 
-Two that should be **refused or reframed**, and are worth checking:
+Two that should be **refused or reframed**:
 
 | Prompt | Correct behaviour |
 |---|---|
@@ -2064,7 +2058,7 @@ is equally "part of the team":
 - **Same team member, different battle state.** Species like Aegislash that
   automatically switch forms mid-battle (Stance Change, Disguise, and similar
   abilities) aren't a different Pokémon and aren't optional the way a Mega
-  Evolution is — so a card for the alternate form gets its own honestly-labeled
+  Evolution is — so a card for the alternate form gets its own
   section instead of being folded into the team count or treated as an
   unrelated mention.
 - **Also mentioned, not part of the team.** A threat example ("Weavile
@@ -2280,7 +2274,7 @@ scarce.
 - **`pokedex-api` has no authentication.** It's designed to sit on a trusted LAN
   behind Open WebUI. Anyone who can reach port 8990 can query it.
 - **Do not expose 8990 to the internet.** If you need remote access, put it behind
-  Tailscale, a VPN, or an authenticating reverse proxy. Open WebUI has real auth; the
+  Tailscale, a VPN, or an authenticating reverse proxy. Open WebUI has auth; the
   tool server does not.
 - If you use a hosted model API, the text of every conversation — including tool
   results — goes to that provider. Your ZIM and database stay local.
