@@ -3,7 +3,7 @@
 Every endpoint `pokedex-api` exposes, with request fields and real response
 shapes. For deployment instructions, see `pokedex-ai-README.md`. This document
 covers the interface only: what to send, what comes back, and what each field
-means.
+means. 
 
 ## Base URL and conventions
 
