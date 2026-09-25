@@ -1,7 +1,7 @@
 # AI Use Declaration
 
 This project utilizes generative AI models to accelerate software development and design.
-
+ 
 ### Models & Tools Used
 1. **Qwen-3.8-Flash-Next (Self-Hosted)**
    - **Scope:** Initial code scaffolding, algorithm design, and offline code generation.
