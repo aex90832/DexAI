@@ -1,5 +1,10 @@
 # DexAI
 
+<div align="center">
+<img width="1024" height="765" alt="DexAI Logo" src="https://github.com/user-attachments/assets/a170f33b-5f41-4b44-a2b6-48d0c1534917" />
+</div>
+
+
 A self-hosted Pokémon knowledge base you can talk to. Ask anything — games, anime,
 TCG, competitive battling — and get an answer grounded in real sources instead of
 whatever the model half-remembers from the internet.
