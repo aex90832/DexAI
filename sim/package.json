@@ -1,6 +1,10 @@
 {
-  "name": "pokedex-sim",
+  "project": "DexAI",
   "version": "1.0.0",
+  "copyright": "Copyright (C) 2026 [Your Name/Username]",
+  "license": "AGPL-3.0-only",
+  "ai_provenance": "Authored with assistance from self-hosted Qwen and Claude models.",
+  "repository": "https://github.com/aex90832/DexAI"
   "private": true,
   "description": "Showdown team validation, damage calculation, and dex dump for pokedex-api",
   "main": "server.js",
