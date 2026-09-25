@@ -6,7 +6,7 @@
 <meta name="format-detection" content="telephone=no">
 <meta name="theme-color" content="#08152b">
 <meta name="color-scheme" content="dark light">
-<title>DexAI AI</title>
+<title>RotomDex AI</title>
 <link rel="icon" type="image/png" href="rotom.png">
 <!--
   ============================================================================
@@ -847,30 +847,54 @@ dialog.pdx-modal::backdrop { background:rgba(0,0,0,.6); }
 @media (prefers-reduced-motion:reduce) { dialog.pdx-modal[open] { animation:none; } }
 
 /* ===== type-pill-css ===== */
-/* ===== unified type pills (matches the Pokédex grid chips) =====
-   Overrides the older outlined/uppercase .pill.type and .mvtype rules. */
-.pill.type, [data-theme="light"] .pill.type, .dexcard .pill.type,
-.pill.type.ok, .pill.type.bad {
-  display:inline-flex; align-items:center; background:var(--c, var(--dim)); border:0; color:#fff;
-  text-shadow:0 1px 2px rgba(0,0,0,.45); border-radius:999px; padding:2px 9px;
-  font-size:10.5px; font-weight:600; line-height:1.45; text-transform:none; letter-spacing:0;
-  white-space:nowrap;
-}
-.dexcard .hd .pill.type { font-size:11px; padding:2px 10px; }
-.pill .pill.type { margin-left:3px; padding:0 7px; font-size:10px; }
-.pill.none { border-style:dashed; background:none; color:var(--faint); }
-.tmx { display:inline-flex; align-items:center; gap:4px; margin-right:4px; }
-.tmx .mult { font-size:10.5px; font-weight:700; font-variant-numeric:tabular-nums; color:var(--dim); }
-.tmx.bad .mult { color:var(--bad); }
-.tmx.ok .mult { color:var(--good); }
-.tmx.imm .mult { color:var(--faint); }
-.tmx.x4 .pill.type { box-shadow:0 0 0 2px rgba(255,107,99,.55); }
-.tmx.imm .pill.type { opacity:.8; }
-.tr-kv .tmx { margin:2px 4px 2px 0; }
-.defrow .pills { gap:6px 4px; }
-/* move rows: type as the same filled chip */
-.mvrow .pill.type.mvtype { flex-shrink:0; font-size:10px; padding:1px 8px; }
-.mvtype.none { flex-shrink:0; color:var(--faint); font-size:10px; }
+/* ===== unified type pills (matches the Pokédex grid chips) =====
+
+   Overrides the older outlined/uppercase .pill.type and .mvtype rules. */
+
+.pill.type, [data-theme="light"] .pill.type, .dexcard .pill.type,
+
+.pill.type.ok, .pill.type.bad {
+
+  display:inline-flex; align-items:center; background:var(--c, var(--dim)); border:0; color:#fff;
+
+  text-shadow:0 1px 2px rgba(0,0,0,.45); border-radius:999px; padding:2px 9px;
+
+  font-size:10.5px; font-weight:600; line-height:1.45; text-transform:none; letter-spacing:0;
+
+  white-space:nowrap;
+
+}
+
+.dexcard .hd .pill.type { font-size:11px; padding:2px 10px; }
+
+.pill .pill.type { margin-left:3px; padding:0 7px; font-size:10px; }
+
+.pill.none { border-style:dashed; background:none; color:var(--faint); }
+
+.tmx { display:inline-flex; align-items:center; gap:4px; margin-right:4px; }
+
+.tmx .mult { font-size:10.5px; font-weight:700; font-variant-numeric:tabular-nums; color:var(--dim); }
+
+.tmx.bad .mult { color:var(--bad); }
+
+.tmx.ok .mult { color:var(--good); }
+
+.tmx.imm .mult { color:var(--faint); }
+
+.tmx.x4 .pill.type { box-shadow:0 0 0 2px rgba(255,107,99,.55); }
+
+.tmx.imm .pill.type { opacity:.8; }
+
+.tr-kv .tmx { margin:2px 4px 2px 0; }
+
+.defrow .pills { gap:6px 4px; }
+
+/* move rows: type as the same filled chip */
+
+.mvrow .pill.type.mvtype { flex-shrink:0; font-size:10px; padding:1px 8px; }
+
+.mvtype.none { flex-shrink:0; color:var(--faint); font-size:10px; }
+
 #hov .fact .pill.type { font-size:10px; padding:0 7px; }
 
 /* ===== card-polish-css ===== */
@@ -1180,6 +1204,30 @@ dialog.pdx-modal::backdrop { background:rgba(0,0,0,.6); }
 .mu-table td:hover:not(.na) { filter:brightness(1.15); }
 @media (max-width:1100px) { .mu-cols { grid-template-columns:minmax(0,1fr); } }
 @media (max-width:760px) { .mu-top { grid-template-columns:minmax(0,1fr); } .mu-mid { flex-direction:row; padding-top:0; } }
+
+/* ===== scrollbars =====
+   Thin, rounded thumbs tinted with the theme's blue, on a transparent track, so
+   scrollbars read as part of each panel instead of grey OS chrome.
+   Firefox uses the standard scrollbar-width / scrollbar-color properties.
+   Chrome, Edge and Safari use the ::-webkit-scrollbar rules instead; the
+   standard properties are kept Firefox-only because in current Chrome they
+   would override (and flatten) the rounded webkit styling. */
+:root { --sb-thumb:rgba(96,164,255,.26); --sb-thumb-hover:rgba(96,164,255,.48); --sb-thumb-active:rgba(245,146,58,.75); }
+[data-theme="light"] { --sb-thumb:rgba(28,78,146,.24); --sb-thumb-hover:rgba(28,78,146,.42); }
+@supports (-moz-appearance:none) {
+  * { scrollbar-width:thin; scrollbar-color:var(--sb-thumb) transparent; }
+  *:hover { scrollbar-color:var(--sb-thumb-hover) transparent; }
+}
+::-webkit-scrollbar { width:10px; height:10px; }
+::-webkit-scrollbar-track { background:transparent; }
+::-webkit-scrollbar-thumb { background:var(--sb-thumb); border-radius:99px;
+  border:3px solid transparent; background-clip:padding-box; min-height:36px; }
+::-webkit-scrollbar-thumb:hover { background:var(--sb-thumb-hover); background-clip:padding-box; }
+::-webkit-scrollbar-thumb:active { background:var(--sb-thumb-active); background-clip:padding-box; }
+::-webkit-scrollbar-corner { background:transparent; }
+/* small horizontal scrollers (filter chips, wide tables) get an even slimmer bar */
+.pdx-row.scrolls::-webkit-scrollbar, .tp-scroll::-webkit-scrollbar, .learn-list::-webkit-scrollbar { height:6px; width:6px; }
+.pdx-row.scrolls::-webkit-scrollbar-thumb, .tp-scroll::-webkit-scrollbar-thumb, .learn-list::-webkit-scrollbar-thumb { border-width:1px; }
 </style>
 </head>
 <body data-view="ask">
@@ -1189,7 +1237,7 @@ dialog.pdx-modal::backdrop { background:rgba(0,0,0,.6); }
   <aside class="pane rail" id="rail">
     <div class="brand">
       <span class="rotom-mark" data-rotom-mark></span>
-      <h1>Dex<span> AI</span></h1>
+      <h1>RotomDex<span> AI</span></h1>
     </div>
 
     <div class="search">
