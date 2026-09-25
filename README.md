@@ -4,12 +4,22 @@ A self-hosted Pokémon knowledge base you can talk to. Ask anything — games, a
 TCG, competitive battling — and get an answer grounded in real sources instead of
 whatever the model half-remembers from the internet.
 
+
+**Note:** DexAI is an unofficial, non-commercial fan project. Not affiliated with Nintendo or The Pokémon Company. See [Disclaimer & License](#license--disclaimer) below.
+
+<img width="1539" height="916" alt="Dex1" src="https://github.com/user-attachments/assets/bd174669-99a2-4091-ad28-f862d15cbc4a" />
+<img width="1546" height="919" alt="Dex2" src="https://github.com/user-attachments/assets/c94f3968-8938-4195-a606-c3164da4b4c6" />
+<img width="1540" height="921" alt="Dex5" src="https://github.com/user-attachments/assets/2130d700-445e-4589-97e9-8fffabd75c30" />
+<img width="1539" height="916" alt="Dex6" src="https://github.com/user-attachments/assets/9b4b59f9-28a3-4635-8b70-9816736fb70a" />
+<div align="center">
+<img width="773" height="461" alt="Dex3" src="https://github.com/user-attachments/assets/79d0386f-4c6e-43ba-ac7e-d244bcb0b323" />
+</div>
+<img width="1533" height="919" alt="Dex4" src="https://github.com/user-attachments/assets/4a3092bf-8c41-475c-98aa-f801cd6336ec" />
+
 This started from having my son and nephew asking me tons of questions as they have gotten into competitive Pokemon battles together. It was also an chance to get better ad coding and see what can be done with self hosted AI.
 
 This guide assumes **nothing is set up**. Every step has sub-steps depending on what
-you already run. Skip the ones that don't apply.
-
-**Note:** DexAI is an unofficial, non-commercial fan project. Not affiliated with Nintendo or The Pokémon Company. See [Disclaimer & License](#license--disclaimer) below.
+you already run. Skip the ones that don't apply
 
 ---
 
@@ -18,7 +28,7 @@ you already run. Skip the ones that don't apply.
 1. [What this is and how it works](#1-what-this-is-and-how-it-works)
 2. [What it can and cannot answer](#2-what-it-can-and-cannot-answer)
 3. [Data sources](#3-data-sources)
-4. [Build scope — mini, standard, full](#4-build-scope--mini-standard-full)
+4. [Build scope — mini, standard, full](#4-build-scope--mini-standard-full)  
     4b. [**Embedding tiers — CPU, GPU, and long-context**](#4b-embedding-tiers--cpu-gpu-and-long-context)
 5. [Network behavior and offline operation](#5-network-behavior-and-offline-operation)
 6. [Pick your path](#6-pick-your-path)
