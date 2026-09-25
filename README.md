@@ -7,7 +7,7 @@
 
 A self-hosted Pokémon knowledge base you can talk to. Ask anything — games, anime,
 TCG, competitive battling — and get an answer grounded in real sources instead of
-whatever the model half-remembers from the internet.
+whatever the model half-remembers from the internet. Supports desktop and mobile.
 
 
 **Note:** DexAI is an unofficial, non-commercial fan project. Not affiliated with Nintendo or The Pokémon Company. See [Disclaimer & License](#license--disclaimer) below.
