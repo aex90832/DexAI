@@ -147,6 +147,8 @@ instead). Not found at all returns `{"found": false, "query": "...", "hint": "..
   "sprite_preview_url": "http://.../sprites/previews/poke_capture_0983_000_mf_n_00000000_f_n.png",
   "sprite_shiny_icon_url": "http://.../sprites/icons/poke_icon_0983_000_mf_n_00000000_f_r.png",
   "sprite_shiny_preview_url": "http://.../sprites/previews/poke_capture_0983_000_mf_n_00000000_f_r.png",
+  "animated_url": "http://.../sprites/animated/0983_kingambit_base_normal.gif",
+  "sprite_shiny_animated_url": "http://.../sprites/animated/0983_kingambit_base_shiny.gif",
   "showing_shiny": false,
   "moves_known": 68
 }
@@ -171,6 +173,14 @@ present on every species, `null`/`false` for an ordinary one:
   `required_item` is null — and "a genuinely different, optional Pokémon"
   when both are true.**
 
+**Animated sprite fields** (`animated_url`, `sprite_shiny_animated_url`) —
+`null` on every species unless `HOME_ANIMATED_DIR` is configured (Step 2b of
+the README). Independently nullable from the static icon/preview fields even
+when configured — the animated archive has its own coverage gap (no
+Gigantamax forms at all), so a species can have a real static sprite with no
+animated counterpart. `null` here is the expected, correct answer for that
+case, not a sign anything's broken.
+
 **Alternate forms list.** When the species has known Mega/regional/Gigantamax/
 cosmetic variants cataloged, an `alternate_forms` array is included:
 
@@ -181,7 +191,8 @@ cosmetic variants cataloged, an `alternate_forms` array is included:
     "is_gmax": false,
     "is_shiny": false,
     "icon_url": "http://.../poke_icon_0006_001_mf_n_00000000_f_n.png",
-    "preview_url": "http://.../poke_capture_0006_001_mf_n_00000000_f_n.png"
+    "preview_url": "http://.../poke_capture_0006_001_mf_n_00000000_f_n.png",
+    "animated_url": "http://.../sprites/animated/0006_charizard_mega-x_normal.gif"
   }
 ]
 ```
@@ -190,12 +201,55 @@ cosmetic variants cataloged, an `alternate_forms` array is included:
 confidently matched against the dex data — still a real image, just not
 labeled with which alternate form it specifically is.
 
+Where the same form has both a male and a female picture (Mega Staraptor), the
+list holds one entry per picture; there is no gender field on an entry.
+
+**Generation matching is exact.** `gen` (default 9) must be a generation the
+species exists in — there is no fall-back to "the newest one it does exist in".
+Rattata is in Gens 1–7 only, Nidorina and Zygarde through Gen 8, so a bare
+`{"name": "Rattata"}` returns `found: false` with the hint `rattata does not exist
+in generation 9`. `/dex_index` rows carry no generation, so a client opening a
+card from the grid should pass the species' own `gen` (or call `common_generation`
+first).
+
+**Visual-only forms.** A form that differs from its base species only in
+appearance — Pikachu's caps, Pichu-Spiky-eared, Antique Sinistea/Polteageist,
+Artisan Poltchageist, Masterpiece Sinistcha (README Step 2f) — is a valid lookup
+name even when no species row exists for it. The response is the **base species'
+data** (stats, typing, abilities, evolution, learnset, `moves_to_check`) under the
+form's own `name` and `id`, plus:
+
+| Field | |
+|---|---|
+| `visual_only` | `true`. Absent on every other species. |
+| `visual_form_of` | The base species' name, e.g. `"Pikachu"`. |
+| `visual_form_note` | A one-sentence, human-readable note that the form is purely visual and its data is the base's. |
+| `image_from_base` | `true` when the still shown is the base species' because the form has none of its own. Absent when it has its own. |
+
+Its picture is its own when it has a still; with only an animation of its own (most of Minior's colours) that animation is kept over the base species' still; with nothing, the base species' whole picture (still and animation together, so the two never show different looks). The same forms appear
+in the base species' `alternate_forms`, and in a visual form's own
+`alternate_forms` its siblings and the base form are listed instead of itself.
+Each such entry carries `"visual_only": true` (and `"image_from_base": true`
+while it borrows a picture), so a UI can label and enable them. The borrowed
+picture is only ever used for the normal variant, never as a stand-in for a shiny.
+
 **Shiny requests.** Pass `shiny: true` to make the shiny sprite the one
-`image_url`/`sprite_icon_url`/`sprite_preview_url` actually point at, rather
-than just being mentioned in the separate `sprite_shiny_*` fields. If no
-shiny sprite is cataloged for this species, the response includes
-`"shiny_unavailable": true` and `image_url` stays the regular sprite —
-check for this key before assuming the shiny request succeeded.
+`image_url`/`sprite_icon_url`/`sprite_preview_url`/`animated_url` actually
+point at, rather than just being mentioned in the separate `sprite_shiny_*`
+fields. If no shiny sprite is cataloged for this species, the response
+includes `"shiny_unavailable": true` and `image_url` stays the regular
+sprite — check for this key before assuming the shiny request succeeded. Note
+that the static and animated shiny swaps are independent: a species can have
+a cataloged shiny *static* sprite with no shiny *animated* one, in which case
+`animated_url` correctly reverts to `null` on the swap rather than showing
+the non-shiny animated file under a shiny request.
+
+**`sim_note`** — present only for species from the Legends Z-A / Champions
+Mega Evolution ingest (README Step 2c), sourced from Bulbapedia rather than
+`@pkmn/dex`. Stats/typing/ability are real; `calc_damage`, `validate_team`,
+`review_team`, and `compare_teams` will all fail on these species, since
+`pokedex-sim`'s actual battle engine has no record of them. Absent for every
+other species.
 
 **Generation 1–2 stats.** These generations had a single Special stat, not
 separate Special Attack/Defense. For `gen <= 2`, `base_stats` is shaped
@@ -216,18 +270,31 @@ guessing:
   "Fire Blast": {
     "learns": false,
     "move_id": "fireblast"
+  },
+  "Psychic Noise": {
+    "learns": false,
+    "move_id": "psychicnoise",
+    "first_learnable_gen": 9,
+    "note": "Not learnable in generation 3; it first becomes learnable in generation 9."
   }
 }
 ```
 
-**`include_learnset`** — the full level-up learnset, ordered by level:
+**Which sources count.** A move counts if the Pokémon can learn it by that generation: every
+source from that generation **or an earlier one**, never a later one. (The database stores the
+same full source list under every generation, so this is applied when reading; see
+`POST /learnset`.) `how` therefore lists only sources up to the generation asked about, and a
+move that only appears later comes back `learns: false` with `first_learnable_gen`.
+`moves_known` is the number of **distinct** moves the Pokémon can learn by that generation.
+
+**`include_learnset`** — the level-up learnset for that generation, ordered by level, plus how many moves the Pokémon has by every other method (for those moves themselves, use `POST /learnset`):
 
 ```json
 "level_up_learnset": [
   {"level": 1, "move": "Iron Head", "type": "Steel", "category": "Physical",
    "power": 80, "accuracy": 100, "effect": "30% chance to flinch."}
 ],
-"other_learn_methods": {"tm": 42, "egg": 3, "tutor": 8}
+"other_learn_methods": {"machine": 42, "egg": 3, "tutor": 8}
 ```
 
 ### Move
@@ -268,7 +335,7 @@ named Pokémon; that's `lookup`.
 |---|---|---|
 | `types` | list[string] | e.g. `["Water", "Ground"]` |
 | `type_mode` | `"all"` \| `"any"` | Default `"all"` |
-| `learns` | list[string] | Must legally learn every move listed |
+| `learns` | list[string] | Must be able to learn every move listed **by `gen`** (sources from that generation or earlier — so a Gen 3 query never counts a move only introduced later) |
 | `ability` | string | |
 | `egg_group` | string | |
 | `tier` | string | e.g. `"OU"` |
@@ -369,6 +436,55 @@ the next request with no restart needed. The cache is per-process: a
 deployment running multiple `pokedex-api` workers would rebuild it
 independently in each one, since nothing shares it between them.
 
+**`visual_form_of`.** A row for a visual-only form (see `/lookup`) carries
+`"visual_form_of": "<base species name>"`, and shows the base species' picture if
+it has none of its own. The key is absent on every other row. `/query_dex` rows
+carry it too.
+
+---
+
+## `GET /formats`
+
+Every competitive format that has any data — curated sets, monthly usage
+statistics, or both — in one response. Built for a UI's format selector: it
+spans Gen 1 through Gen 9 and says, per format, what kind of data exists, so a
+UI can offer every format and still cope with the ones that have no usage
+statistics. Not a chat tool: `GET`, no request body, deliberately outside
+`TOOL_SCHEMAS`.
+
+**Request:** none.
+
+**Response**
+
+```json
+{
+  "count": 118,
+  "default": "gen9ou",
+  "formats": [
+    {"format": "gen1ou", "gen": 1, "label": "Gen 1 OU", "sets": 78, "usage": null, "source": null},
+    {"format": "gen11v1", "gen": 1, "label": "Gen 1 1v1", "sets": 51, "usage": null, "source": null},
+    {"format": "gen9ou", "gen": 9, "label": "Gen 9 OU", "sets": 278,
+     "usage": {"months": 11, "latest": "2026-08"}, "source": "Smogon"},
+    {"format": "gen9championsvgc2026regmc", "gen": null, "label": "Champions VGC 2026 Reg M-C",
+     "sets": 0, "usage": {"months": 1, "latest": "2026-05"}, "source": "Pikalytics"}
+  ]
+}
+```
+
+| Field | Notes |
+|---|---|
+| `format` | The Showdown-style ID — pass it as `format` to `usage_stats`, `get_sets`, or `validate_team`. |
+| `gen` | The generation, parsed from the ID (`gen11v1` is **Gen 1's** 1v1 — the generation is always the single digit after `gen`). `null` for Pokémon Champions formats (not a mainline generation, though their IDs start `gen9`) and any other ID with no `gen<N>` prefix. |
+| `label` | Human-readable, e.g. `"Gen 7 VGC 2018"`. An unrecognised format still appears, with a best-effort label, rather than being dropped. |
+| `sets` | Number of curated Smogon sets for the format. `0` if it has usage statistics but no sets. |
+| `usage` | `null` when the format has **no usage statistics** — the common case: most formats have sets only. Otherwise `months` (how many months are loaded) and `latest` (`YYYY-MM`). |
+| `source` | Who the usage numbers came from — `"Pikalytics"` (credit it), `"Smogon"`, or `null` when the format has no usage data. |
+| `default` | The server's `DEFAULT_FORMAT`, so a UI can preselect it. |
+
+Sorted by generation ascending, then label; formats without a generation sort
+last. That is alphabetical within a generation, so a UI that wants the main
+tier first should reorder client-side.
+
 ---
 
 ## `POST /search_wiki`
@@ -417,49 +533,114 @@ error.
 
 ## `POST /usage_stats`
 
-Smogon ladder usage. Descriptive (what people play), not prescriptive (what's
-optimal) — say so when it matters.
+Ladder usage. Descriptive (what people play), not prescriptive (what's
+optimal) — say so when it matters. Standard tiers come from Smogon; the Pokémon
+Champions formats come from Pikalytics (README section 3.3b).
 
 **Request**
 
 | Field | Type | Notes |
 |---|---|---|
-| `format` | string | e.g. `"gen9ou"`, defaults to the server's default format |
+| `format` | string | e.g. `"gen9ou"`, defaults to the server's default format. Champions: `"gen9championsvgc2026regmc"` (current ladder), `"battledataregmbs3"`. `GET /formats` lists what has data. |
 | `species` | string | Omit for the overall usage ranking instead of one Pokémon's detail |
-| `month` | string | `YYYY-MM`, omit for most recent available |
+| `month` | string | `YYYY-MM`. Omit for the latest month **that format** has — formats from different sources are dated differently, so this is per format, not one global month. |
 | `limit` | int | 1–50, default 20 (only applies to the ranking form) |
 
-**With `species`** — full detail for one Pokémon:
+**With `species`** — full detail for one Pokémon. Each list is `[{"name", "pct"}]`,
+highest first:
 
 ```json
 {
   "available": true, "format": "gen9ou", "month": "2026-08", "cutoff": 1630,
   "name": "Kingambit", "usage_pct": 14.32, "raw_count": 48213,
-  "moves": {"Swords Dance": 61.2, "Sucker Punch": 58.9, "Kowtow Cleave": 71.4},
-  "items": {"Leftovers": 34.1, "Black Glasses": 22.7},
-  "abilities": {"Supreme Overlord": 98.2, "Defiant": 1.8},
-  "spreads": {"Adamant:252/0/4/0/0/252": 18.3},
-  "teammates": {"Great Tusk": 24.1, "Gholdengo": 19.8},
-  "checks_and_counters": {"Great Tusk": 0.71, "Zamazenta": 0.68},
+  "moves":     [{"name": "Kowtow Cleave", "pct": 71.4}, {"name": "Swords Dance", "pct": 61.2}],
+  "items":     [{"name": "Leftovers", "pct": 34.1}],
+  "abilities": [{"name": "Supreme Overlord", "pct": 98.2}],
+  "spreads":   [{"name": "Adamant:252/0/4/0/0/252", "pct": 18.3}],
+  "teammates": [{"name": "Great Tusk", "pct": 24.1}],
+  "checks_and_counters": [{"name": "Great Tusk", "score": 0.71}],
   "note": "Percentages are shares within that category, not usage rates. ..."
 }
 ```
+
+**A Pikalytics-sourced format** (Champions) answers in the same shape, with
+differences that matter:
+
+```json
+{
+  "available": true, "format": "gen9championsvgc2026regmc", "month": "2026-05", "cutoff": 1760,
+  "name": "Rillaboom", "usage_pct": 37.18, "raw_count": 29118,
+  "moves": [{"name": "Fake Out", "pct": 57.08}, {"name": "Grassy Glide", "pct": 37.69}],
+  "items": [{"name": "Life Orb", "pct": 28.15}], "abilities": [{"name": "Grassy Surge", "pct": 99.19}],
+  "spreads": [], "teammates": [{"name": "Incineroar", "pct": 39.14}],
+  "source": "Pikalytics", "data_date": "2026-05",
+  "win_rate_pct": 51.8, "record": "15084-14034", "brought_pct": 61.74, "mega_pct": 0.0,
+  "leads": [{"name": "Sneasler", "games": 847, "pct": 12.18, "win_pct": 48.2}],
+  "note": "Source: Pikalytics — credit it when quoting this. Abilities and items are shares ..."
+}
+```
+
+- `source` and `data_date` are always present here. **Credit the source.**
+- `win_rate_pct` and `record` are the Pokémon's overall win rate and wins-losses;
+  `brought_pct` is Pikalytics' own figure for how often it is actually brought to
+  the battle; `mega_pct` is its Mega share, with `megas` (raw, as Pikalytics
+  reports it) when it has any; `leads` is likewise as reported.
+- **The percentages are not all shares.** Ability and item percentages sum to about
+  100. Move and teammate percentages do not (one Pokémon's top ten moves summed to
+  166%) — read them as relative popularity. The `note` says so.
+- This VGC format publishes no spreads, so `spreads` is `[]`, and `checks_and_counters` is **absent** (its counters list has no stated definition). The other Champions format does have spreads — see below.
+- `raw_count` is the sample size; a small one means a small sample.
+
+**`battledataregmbs3`** (Pikalytics' battle data) has **no usage share**. It answers with
+`usage_pct: null`, the games played, win rate and record, Pikalytics' own rank, and real
+builds:
+
+```json
+{
+  "available": true, "format": "battledataregmbs3", "month": "2026-05", "cutoff": 1760,
+  "name": "Garchomp", "usage_pct": null, "games": 11442, "raw_count": 11442,
+  "moves": [{"name": "Dragon Claw", "pct": 89.4}], "items": [{"name": "Life Orb", "pct": 51.5}],
+  "abilities": [{"name": "Rough Skin", "pct": 98.5}],
+  "spreads": [{"name": "2/32/0/0/0/32", "pct": 32.7}],
+  "spread_unit": "Stat Points (Pokemon Champions: up to 32 in each stat, 66 in total) — NOT EVs. ...",
+  "natures": [{"name": "Jolly", "pct": 60.5}, {"name": "Adamant", "pct": 38.9}],
+  "teammates": [{"name": "Whimsicott", "pct": null}, {"name": "Charizard", "pct": null}],
+  "source": "Pikalytics", "data_date": "2026-05",
+  "win_rate_pct": 47.72, "record": "5454-5975", "pikalytics_rank": 1,
+  "note": "Source: Pikalytics — credit it when quoting this. This format publishes games played, ..."
+}
+```
+
+- **`usage_pct` is null and must not be estimated.** The rank is not ordered by games played,
+  so a share computed from `games` would look like the VGC figure and mean something else.
+- `spreads` are **Stat Points**, not EVs (up to 32 per stat, 66 in all, in
+  HP/Atk/Def/SpA/SpD/Spe order), and `spread_unit` says so. The nature in a spread is
+  usually blank; natures come separately in `natures`.
+- `teammates` come in rank order with `pct: null`; no percentage exists for them.
+- `moves` percentages are per-move rates and do not sum to 100; abilities and items do.
 
 **Without `species`** — the ranking:
 
 ```json
 {
-  "available": true, "format": "gen9ou", "month": "2026-08",
+  "available": true, "format": "gen9championsvgc2026regmc", "month": "2026-05",
   "ranking": [
-    {"rank": 1, "name": "Great Tusk", "usage_pct": 28.4, "raw_count": 95201}
+    {"rank": 1, "name": "Rillaboom", "usage_pct": 37.18, "raw_count": 29118, "win_rate_pct": 51.8}
   ],
-  "months_available": ["2026-06", "2026-07", "2026-08"]
+  "months_available": ["2026-05"],
+  "source": "Pikalytics",
+  "note": "Source: Pikalytics — credit it when quoting this. usage_pct is how often a Pokemon shows up on a team."
 }
 ```
 
+For `battledataregmbs3` the ranking is ordered by Pikalytics' own rank, every entry has `usage_pct: null` and `games`, and the response adds `ranked_by` and the no-usage note. `months_available` lists the months **that format** has. `win_rate_pct`, `source`
+and `note` appear only for sources that publish them (Pikalytics), never on a
+Smogon ranking.
+
 Not found returns `available: false` with either `top_in_format` (species
 lookup — a hint at what *is* used in that format) or `formats_available`
-(format lookup — every format that has data at all).
+(format lookup — every format that has data at all). Legends Z-A has no usage data
+in any source, so it is never listed.
 
 ---
 
@@ -591,6 +772,138 @@ named Pokémon — not every Pokémon exists in every generation.
 the current generation). `gen` is `null` and `available` is `false` only if no
 single generation includes all of them — genuinely rare, since generation
 ranges are contiguous.
+
+---
+
+## `POST /learnset`
+
+Every move a Pokémon learns in a generation, grouped by how it learns it — the data for a
+learnset page. REST only (not a chat tool), like `/formats`.
+
+**Request**
+
+| Field | Type | Notes |
+|---|---|---|
+| `species` | string | Required. A form with no learnset of its own (a Mega), or a purely visual form, answers with its base species', and a `note` says so. |
+| `gen` | int, 1–9 | Defaults to the server's default. The species must exist in that generation. |
+| `method` | string | Optional. Only this way of learning: `level-up`, `machine`, `tutor`, `egg`, `event`, `dream world` (case-insensitive). |
+| `include_earlier_gens` | bool | Default `false`: only moves from that generation's **own games**. `true` also lists moves whose source is an earlier generation (carried forward). |
+
+**Response**
+
+```json
+{
+  "found": true, "species": "Gardevoir", "gen": 3,
+  "scope": "moves from generation 3's own games",
+  "available_methods": ["level-up", "machine", "tutor", "egg", "event"],
+  "counts": {"level-up": 10, "machine": 27, "tutor": 18, "egg": 4, "event": 1},
+  "total_moves": 56,
+  "methods": {
+    "level-up": [{"move": "Growl", "level": 1, "type": "Normal", "category": "Status",
+                  "power": null, "accuracy": 100, "effect": "Lowers the foe's Attack by 1.", "from_gen": 3}],
+    "machine":  [{"move": "Psychic", "type": "Psychic", "category": "Special",
+                  "power": 90, "accuracy": 100, "effect": "...", "from_gen": 3}]
+  }
+}
+```
+
+- `methods` is ordered level-up, machine, tutor, egg, event, then anything else. `level-up`
+  entries carry a `level` and are in level order; every other group is alphabetical.
+- `from_gen` is the generation the source belongs to. Natively it always equals `gen`; with
+  `include_earlier_gens` it can be lower. A move that appears more than once in a group keeps its
+  newest source (level-up moves are kept per level).
+- Type, category, power, accuracy and effect are the move **as it was in that generation**.
+- `counts` and `total_moves` (distinct moves) describe what is returned, after any `method` filter.
+- Nothing in scope gives `found: true`, empty `methods` and a `hint`. A species that doesn't exist
+  in that generation gives `found: false`.
+- In the example, `counts` and `total_moves` are Gardevoir's real Gen 3 figures from a live build.
+  `total_moves` is the number of **distinct** moves, so it is smaller than the sum of the counts (60)
+  because four moves can be learned more than one way. The two move entries shown are abbreviated and
+  their text illustrative; the groups other than `level-up` and `machine` are omitted.
+
+**Why the source generation matters.** The database stores each species' *complete* source list
+under every generation it exists in, so Gardevoir's Gen 3 and Gen 9 rows are identical and only
+`source_gen` tells you when a source applies. Reading `gen` alone would list Gen 9 TMs, and even
+Gen 5 Dream World moves, as Gen 3 moves.
+
+---
+
+## `POST /get_locations`
+
+Where a Pokémon can be caught, evolved, or obtained in the main-series games,
+by generation and game. These are Bulbapedia's own per-generation location
+tables, parsed from the raw article HTML into structured data. Use this for
+"where do I find X"; use `search_wiki` only for detail it doesn't cover.
+
+**Request**
+
+| Field | Type | Notes |
+|---|---|---|
+| `species` | string | Required. A form (Alolan Raichu, a Mega) returns its **base species'** locations, with a `note` saying so. |
+| `gen` | int, 1–9 | Optional. Limit to one generation. Omit for every generation. |
+| `game` | string | Optional. Case-insensitive substring of a game name — `"crystal"` matches Crystal. |
+
+**Response**
+
+```json
+{
+  "found": true,
+  "species": "Clefable",
+  "note": null,
+  "generations": [
+    {
+      "gen": 1,
+      "entries": [
+        {"games": ["Red", "Blue", "Yellow"], "location": "Evolve Clefairy"},
+        {"games": ["Blue (Japan)"], "location": "Rocket Game Corner"}
+      ]
+    },
+    {
+      "gen": 3,
+      "entries": [
+        {"games": ["Ruby", "Sapphire", "Emerald", "Colosseum", "XD"], "location": "Trade"}
+      ]
+    }
+  ]
+}
+```
+
+Games that share a location within a generation are grouped into one entry,
+mirroring the source table — Red/Blue/Yellow above all read "Evolve
+Clefairy", while Blue (Japan) has its own. Grouping is by identical location
+text, so it can combine games that weren't adjacent in the source table
+(Ruby, Sapphire and Emerald above).
+
+**Forms.** Bulbapedia documents every form of a species on one page, so a
+form's lookup returns the whole page, with each form's part labelled inside
+the text:
+
+```json
+{
+  "found": true,
+  "species": "Raichu-Alola",
+  "note": "Raichu-Alola is a form of Raichu — these are Raichu's locations.",
+  "generations": [
+    {"gen": 7, "entries": [
+      {"games": ["Sun", "Moon"],
+       "location": "Trade (Kantonian Form); Evolve Pikachu (Alolan Form)"}
+    ]}
+  ]
+}
+```
+
+`;` separates distinct entries within one cell (the source's line breaks).
+The `(Alolan Form)`-style labels are Bulbapedia's own; nothing filters to one
+form's part yet.
+
+**When nothing matches**, `found` is `false` with a `hint`: a bad name gets a
+name-check hint, and a `gen`/`game` filter that excluded everything lists the
+generations the species *does* have data for. If the table hasn't been
+ingested yet, the hint says to run `ingest.py --locations-only`.
+
+**Scope.** Main-series games only. Side games (Mystery Dungeon, GO, Pokémon
+Snap...), event distributions, and promotions are not included. Rows for a
+generation before a species' debut are dropped at ingest.
 
 ---
 
@@ -939,13 +1252,17 @@ cards.
       "weak": ["Fighting", "Ground", "Fire"], "resist": ["Normal", "Flying", "..."],
       "immune": ["Psychic"],
       "item": "Leftovers", "ability": "Supreme Overlord", "nature": "Adamant",
-      "moves": [{"name": "Sucker Punch", "type": "Dark", "category": "Physical", "base_power": 70, "pp": 5}]
+      "moves": [{"name": "Sucker Punch", "type": "Dark", "category": "Physical", "base_power": 70, "pp": 5}],
+      "animated_url": "http://.../sprites/animated/0983_kingambit_base_normal.gif"
     }
   ],
   "battle_forms": [],
   "mentioned": []
 }
 ```
+
+`animated_url` is `null` when no animated sprite is configured or cataloged
+for this species — same rules as `/lookup`'s own field.
 
 Three card groups, in order of how directly they're "the team":
 
