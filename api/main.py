@@ -85,6 +85,7 @@ DEFAULT_FORMAT = os.environ.get("DEFAULT_FORMAT", "gen9ou")
 # wherever these get mounted (see the mount right after app init).
 HOME_ICONS_DIR = os.environ.get("HOME_ICONS_DIR", "")
 HOME_PREVIEWS_DIR = os.environ.get("HOME_PREVIEWS_DIR", "")
+HOME_ANIMATED_DIR = os.environ.get("HOME_ANIMATED_DIR", "")
 
 # Query embedding is one short string at a time, so a large ONNX thread pool is
 # pure overhead — and on a big host it would monopolize cores the model server
@@ -190,10 +191,22 @@ def is_battle_only(val) -> bool:
     return str(val) == "1"
 
 
+# Which of a form's several home_sprites rows counts as "the" sprite when it has more than
+# one gender variant. HOME's codes: mf = same for both sexes, md / fd = male / female
+# display of a species whose sexes look different, mo / fo = male- / female-only, uk =
+# genderless. Lower is preferred: the male display is the default look of a dimorphic
+# species, and the female display (fd) is a variant, so it ranks last. ingest.py's
+# _ANIMATED_GENDER_PREFERENCE is the same ordering, on the write side.
+_GENDER_RANK = {"mf": 0, "md": 1, "mo": 2, "fo": 3, "uk": 4, "fd": 5}
+_GENDER_RANK_SQL = ("CASE gender " + " ".join(
+    f"WHEN '{g}' THEN {r}" for g, r in _GENDER_RANK.items()) + " ELSE 6 END")
+
+
 def species_sprite(c: sqlite3.Connection, num: int, forme: str | None,
-                    full_name: str, shiny: bool = False) -> tuple[str | None, str | None]:
+                    full_name: str, shiny: bool = False) -> tuple[str | None, str | None, str | None]:
     """
-    (icon_path, preview_path) for one species, correctly forme-aware.
+    (icon_path, preview_path, animated_path) for one species, correctly
+    forme-aware.
 
     The bug this fixes: three separate places in this file each independently
     reimplemented "find this species' sprite" — /lookup's own species branch,
@@ -207,23 +220,44 @@ def species_sprite(c: sqlite3.Connection, num: int, forme: str | None,
     logic had no idea "Charizard-Mega-X" wasn't just "Charizard". One shared
     function, used everywhere a sprite is resolved, is how this stays fixed
     rather than needing to be found and re-fixed a third time somewhere else.
+
+    animated_path is independently nullable from icon_path/preview_path —
+    the animated archive has its own coverage gap (no Gigantamax forms at
+    all, confirmed directly), so a species can have a static sprite with no
+    animated counterpart. That's a normal, expected case, not an error.
     """
     is_shiny = 1 if shiny else 0
     if forme:
-        row = c.execute(
-            "SELECT icon_path, preview_path FROM home_sprites "
-            "WHERE natdex=? AND forme_name=? AND is_shiny=?",
-            (num, full_name, is_shiny),
-        ).fetchone()
+        where, params = "natdex=? AND forme_name=? AND is_shiny=?", (num, full_name, is_shiny)
     else:
-        row = c.execute(
-            "SELECT icon_path, preview_path FROM home_sprites "
-            "WHERE natdex=? AND form_index=0 AND is_gmax=0 AND is_shiny=?",
-            (num, is_shiny),
-        ).fetchone()
-    if row:
-        return row["icon_path"], row["preview_path"]
-    return None, None
+        where, params = ("natdex=? AND form_index=0 AND is_gmax=0 AND is_shiny=?",
+                         (num, is_shiny))
+
+    # A form can have several rows, one per gender variant (a dimorphic species has md
+    # AND fd; an already-ingested database can also still hold an animated-only "mf"
+    # row from before ingest.py attached animations to the static row). Pick by what
+    # the caller actually needs, in order: a row with a hero preview, then one with an
+    # icon, then the preferred gender — so the default is the male display, never the
+    # female variant and never an image-less animated-only row.
+    row = c.execute(
+        f"SELECT icon_path, preview_path, animated_path FROM home_sprites WHERE {where} "
+        f"ORDER BY (preview_path IS NOT NULL) DESC, (icon_path IS NOT NULL) DESC, "
+        f"{_GENDER_RANK_SQL} LIMIT 1", params).fetchone()
+    if not row:
+        return None, None, None
+
+    # The animation is independent of which row supplied the static image: take it from
+    # the chosen row, else from any other row of the same form, preferring the same
+    # gender order (so a female-only animation is only ever a last resort). This is what
+    # keeps the base animation reachable on a database that hasn't been re-ingested yet.
+    animated = row["animated_path"]
+    if not animated:
+        a_row = c.execute(
+            f"SELECT animated_path FROM home_sprites WHERE {where} "
+            f"AND animated_path IS NOT NULL ORDER BY {_GENDER_RANK_SQL} LIMIT 1",
+            params).fetchone()
+        animated = a_row["animated_path"] if a_row else None
+    return row["icon_path"], row["preview_path"], animated
 
 
 def resolve_images_by_name(c: sqlite3.Connection, names: list[str]) -> dict[str, dict]:
@@ -260,7 +294,7 @@ def resolve_images_by_name(c: sqlite3.Connection, names: list[str]) -> dict[str,
             continue
         num, full_name, forme = srow["num"], srow["name"], srow["forme"]
 
-        icon_path, preview_path = species_sprite(c, num, forme, full_name)
+        icon_path, preview_path, animated_path = species_sprite(c, num, forme, full_name)
 
         url = None
         if icon_path or preview_path:
@@ -283,6 +317,7 @@ def resolve_images_by_name(c: sqlite3.Connection, names: list[str]) -> dict[str,
                 "base_species": srow["base_species"],
                 "battle_only": is_battle_only(srow["battle_only"]),
                 "required_item": srow["required_item"],
+                "animated_url": animated_path,
                 **defensive_profile(c, srow["gen"], types),
             }
     return out
@@ -567,6 +602,27 @@ class CommonGenerationRequest(BaseModel):
     )
 
 
+class GetLocationsRequest(BaseModel):
+    species: str = Field(..., description="Pokemon name, e.g. 'Pikachu' or 'Clefable'. "
+                                          "A form (Alolan Raichu, a Mega) returns its "
+                                          "base species' locations.")
+    gen: int | None = Field(None, ge=1, le=9,
+                            description="Limit to one generation. Omit for every generation.")
+    game: str | None = Field(None, description="Limit to one game, e.g. 'Crystal' or "
+                                               "'Scarlet' (case-insensitive substring).")
+
+
+class LearnsetRequest(BaseModel):
+    species: str = Field(..., description="Pokemon name. A form with no learnset of its own, and a "
+                                          "purely visual form, use its base species'.")
+    gen: int | None = Field(None, ge=1, le=9, description=f"Generation 1-9. Defaults to {DEFAULT_GEN}.")
+    method: str | None = Field(None, description="Only this way of learning: level-up, machine, "
+                                                 "tutor, egg, event, 'dream world' (case-insensitive).")
+    include_earlier_gens: bool = Field(
+        False, description="Also list moves whose only source is an EARLIER generation (carried "
+                           "forward by transfer). Default: only that generation's own games.")
+
+
 class QueryItemsRequest(BaseModel):
     is_choice: bool | None = Field(None, description="Choice Band/Specs/Scarf.")
     is_berry: bool | None = None
@@ -642,14 +698,16 @@ app.add_middleware(GZipMiddleware, minimum_size=1000)
 # Optional Pokemon HOME sprite mounts. StaticFiles raises at MOUNT time (not
 # on first request) if the directory doesn't exist, so this has to be guarded
 # — an unset or not-yet-populated HOME_ICONS_DIR must not crash the whole app
-# on startup. The mount paths here (/sprites/icons, /sprites/previews) must
-# match whatever HOME_SPRITES_URL was set to when ingest.py ran --sprites-only,
-# since the URLs stored in home_sprites were built from that value at ingest
-# time, not reconstructed here.
+# on startup. The mount paths here (/sprites/icons, /sprites/previews,
+# /sprites/animated) must match whatever HOME_SPRITES_URL was set to when
+# ingest.py ran --sprites-only, since the URLs stored in home_sprites were
+# built from that value at ingest time, not reconstructed here.
 if HOME_ICONS_DIR and Path(HOME_ICONS_DIR).is_dir():
     app.mount("/sprites/icons", StaticFiles(directory=HOME_ICONS_DIR), name="sprite_icons")
 if HOME_PREVIEWS_DIR and Path(HOME_PREVIEWS_DIR).is_dir():
     app.mount("/sprites/previews", StaticFiles(directory=HOME_PREVIEWS_DIR), name="sprite_previews")
+if HOME_ANIMATED_DIR and Path(HOME_ANIMATED_DIR).is_dir():
+    app.mount("/sprites/animated", StaticFiles(directory=HOME_ANIMATED_DIR), name="sprite_animated")
 
 
 # ---------------------------------------------------------------------------
@@ -801,6 +859,59 @@ def health():
 # lookup
 # ---------------------------------------------------------------------------
 
+# ---- visual-only forms ------------------------------------------------------------------
+# A form that differs from its base species only in appearance (Pikachu's caps, the Antique
+# and Masterpiece Sinistea/Polteageist/Sinistcha...). Curated in ingest.py's VISUAL_ONLY_FORMES
+# and stored in visual_forms. Such a form is clickable and resolves to the BASE species' data,
+# with its own picture when it has one; every helper degrades to "no visual forms" on a
+# database that predates the table.
+
+def _visual_form(c: sqlite3.Connection, form_id: str):
+    try:
+        return c.execute("SELECT form_id, form_name, base_id, natdex FROM visual_forms "
+                         "WHERE form_id=?", (form_id,)).fetchone()
+    except sqlite3.OperationalError:
+        return None
+
+
+def _visual_forms_for(c: sqlite3.Connection, natdex: int) -> list:
+    try:
+        return c.execute("SELECT form_id, form_name, base_id FROM visual_forms "
+                         "WHERE natdex=? ORDER BY form_name", (natdex,)).fetchall()
+    except sqlite3.OperationalError:
+        return []
+
+
+def _visual_form_of_map(c: sqlite3.Connection) -> dict:
+    """{visual form id: its base species' display name}, for tagging dex rows."""
+    try:
+        return {r["form_id"]: r["base_name"] for r in c.execute(
+            "SELECT v.form_id, s.name AS base_name FROM visual_forms v "
+            "JOIN species s ON s.id = v.base_id GROUP BY v.form_id")}
+    except sqlite3.OperationalError:
+        return {}
+
+
+def _form_sprites(c: sqlite3.Connection, r, visual, shiny: bool = False):
+    """
+    (icon, preview, animated, used_base) for a species row, or for a visual-only form of it.
+    A visual form uses its OWN picture when it has a static one. With only an animation of its
+    own (most of Pikachu's caps: the animated archive has them, the still archive doesn't) its
+    animation is kept over the base species' still — the animation is the only place the form's
+    actual look exists. With nothing of its own it takes the base species' whole picture, still
+    and animation together (a base animation next to a form's own still would be two different
+    looks). used_base is True whenever the STILL came from the base.
+    """
+    if visual:
+        own = species_sprite(c, r["num"], visual["form_name"], visual["form_name"], shiny=shiny)
+        if own[0] or own[1]:
+            return (*own, False)
+        icon, preview, animated = species_sprite(c, r["num"], r["forme"], r["name"], shiny=shiny)
+        return icon, preview, own[2] or animated, True
+    icon, preview, animated = species_sprite(c, r["num"], r["forme"], r["name"], shiny=shiny)
+    return icon, preview, animated, False
+
+
 @app.post(
     "/lookup",
     operation_id="lookup",
@@ -852,7 +963,12 @@ def lookup(req: LookupRequest):
 
     with db() as c:
         if kind == "species":
-            r = c.execute("SELECT * FROM species WHERE id=? AND gen=?", (cid, gen)).fetchone()
+            # A visual-only form is answered from its BASE species' row — every stat, type,
+            # ability and move is the base's by definition — while keeping its own name and
+            # picture. The form's own species row (Pikachu-Alola has one) is deliberately ignored.
+            visual = _visual_form(c, cid)
+            learn_id = visual["base_id"] if visual else cid    # a visual form learns exactly what its base does
+            r = c.execute("SELECT * FROM species WHERE id=? AND gen=?", (learn_id, gen)).fetchone()
             if not r:
                 return {"found": False, "query": req.name,
                         "hint": f"{cid} does not exist in generation {gen}."}
@@ -904,12 +1020,35 @@ def lookup(req: LookupRequest):
                 "battle_only": is_battle_only(r["battle_only"]),
                 "required_item": r["required_item"],
             }
+            if visual:
+                out["id"], out["name"] = visual["form_id"], visual["form_name"]
+                out["visual_only"] = True
+                out["visual_form_of"] = r["name"]
+                out["visual_form_note"] = (
+                    f"{visual['form_name']} is purely a visual form of {r['name']}: every stat, "
+                    f"type, ability, move and evolution detail here is identical to {r['name']}'s. "
+                    f"Only its appearance differs.")
+            # These rows come from Bulbapedia, not @pkmn/dex — pokedex-sim's
+            # real battle engine has no knowledge of them at all, since
+            # nothing here touches its own data. tier carries the source's
+            # own availability tokens (ZA / Champs / MD) for exactly these
+            # rows and nothing else, so it doubles as the detection signal.
+            if r["tier"] and re.search(r"\b(ZA|MD|Champs)\b", r["tier"]):
+                out["sim_note"] = (
+                    "This is from Pokemon Legends: Z-A / Champions, sourced from "
+                    "Bulbapedia — not from the battle engine's own data. Stats/"
+                    "typing/ability here are real, but calc_damage, validate_team, "
+                    "review_team, and compare_teams will all fail on this species, "
+                    "since the simulator itself has no record of it."
+                )
 
             # HOME sprites (this species' OWN form — base or a specific
             # Mega/regional forme — non-shiny) take priority over the
             # Bulbapedia extraction's inconsistent webp crops. image_url is
             # kept as the single field every existing caller already reads.
-            icon_path, preview_path = species_sprite(c, r["num"], r["forme"], r["name"])
+            icon_path, preview_path, animated_path, from_base = _form_sprites(c, r, visual)
+            if visual and from_base:
+                out["image_from_base"] = True   # no picture of its own yet: this is the base's
             if icon_path or preview_path:
                 out["image_url"] = preview_path or icon_path
                 out["sprite_icon_url"] = icon_path
@@ -922,6 +1061,11 @@ def lookup(req: LookupRequest):
                 out["image_url"] = img["image_url"] if img else None
                 out["sprite_icon_url"] = None
                 out["sprite_preview_url"] = None
+            # Independently nullable from icon/preview — the animated
+            # archive has its own coverage gap (no Gigantamax forms at all,
+            # confirmed directly), so a species having a static sprite but no
+            # animated one is a normal, expected case, not an error.
+            out["animated_url"] = animated_path
 
             # Shiny of the SAME form just resolved above — every catalogued
             # alternate form (Megas, regional variants, Gmax, cosmetic) has
@@ -930,9 +1074,10 @@ def lookup(req: LookupRequest):
             # ordering (see ingest.py) — an entry with forme_name=None is a
             # real image whose specific forme just wasn't verified, not a
             # placeholder.
-            shiny_icon, shiny_preview = species_sprite(c, r["num"], r["forme"], r["name"], shiny=True)
+            shiny_icon, shiny_preview, shiny_animated, _ = _form_sprites(c, r, visual, shiny=True)
             out["sprite_shiny_icon_url"] = shiny_icon
             out["sprite_shiny_preview_url"] = shiny_preview
+            out["sprite_shiny_animated_url"] = shiny_animated
 
             # req.shiny makes the shiny variant the PRIMARY displayed image
             # (what image_url points at, what the card actually shows) rather
@@ -945,6 +1090,7 @@ def lookup(req: LookupRequest):
                     out["image_url"] = shiny_preview or shiny_icon
                     out["sprite_icon_url"] = shiny_icon
                     out["sprite_preview_url"] = shiny_preview
+                    out["animated_url"] = shiny_animated
                     out["showing_shiny"] = True
                 else:
                     out["shiny_unavailable"] = True
@@ -957,22 +1103,115 @@ def lookup(req: LookupRequest):
                 # is form_index=0 AND is_gmax=0, regardless of shininess
                 # (base shiny is already surfaced via sprite_shiny_* above,
                 # not meant to duplicate into this list).
-                "SELECT form_index, is_gmax, is_shiny, forme_name, icon_path, preview_path "
-                "FROM home_sprites WHERE natdex=? AND NOT (form_index=0 AND is_gmax=0) "
+                #
+                # That exclusion only makes sense when the CURRENTLY-LOOKED-UP
+                # species is itself the form_index=0 entry — excluding it
+                # unconditionally hid a real, distinct battle form for any
+                # species where form_index=0 ISN'T just "the trivial default
+                # appearance of whatever you're already looking at." Confirmed
+                # real: Zygarde-50% occupies form_index=0 in HOME's own
+                # numbering, but it's a genuinely different, separately
+                # selectable battle form from Zygarde-10%/-Complete, not a
+                # redundant restatement of them — looking up 10% or Complete
+                # should be able to list 50% as an alternate, and blanket
+                # exclusion made that impossible for every species this
+                # pattern applies to, not just Zygarde.
+                "SELECT form_index, is_gmax, is_shiny, forme_name, icon_path, "
+                "preview_path, animated_path FROM home_sprites WHERE natdex=? "
+                "AND NOT (form_index=0 AND is_gmax=0 AND ?) "
                 "ORDER BY form_index, is_gmax, is_shiny",
-                (r["num"],),
+                (r["num"], not bool(visual["form_name"] if visual else r["forme"])),
             ).fetchall()
-            if alt_forms:
-                out["alternate_forms"] = [
-                    {
-                        "forme_name": a["forme_name"],
-                        "is_gmax": bool(a["is_gmax"]),
-                        "is_shiny": bool(a["is_shiny"]),
-                        "icon_url": a["icon_path"],
-                        "preview_url": a["preview_path"],
-                    }
-                    for a in alt_forms
-                ]
+            forms_list = [
+                {
+                    "forme_name": a["forme_name"],
+                    "is_gmax": bool(a["is_gmax"]),
+                    "is_shiny": bool(a["is_shiny"]),
+                    "icon_url": a["icon_path"],
+                    "preview_url": a["preview_path"],
+                    "animated_url": a["animated_path"],
+                }
+                for a in alt_forms
+            ]
+
+            # The Legends Z-A / Champions Megas (see /za_champions_megas)
+            # live ENTIRELY in this table, with no home_sprites row at all —
+            # @pkmn/dex has no data for them, so the sprite-matching pipeline
+            # (static or animated) never gets a forme to key a row off of.
+            # Without this, a species with one of these new Megas would show
+            # zero alternate forms even though the Mega genuinely exists and
+            # /lookup on its own name works fine — confirmed directly as a
+            # real gap, not a hypothetical. Excludes names already covered
+            # above so a species with BOTH a real, sprited classic Mega and a
+            # new, sprite-less Z-A "Mega-Z" (Absol, Garchomp, Lucario...)
+            # shows both without duplicating the classic one.
+            covered = {f["forme_name"] for f in forms_list if f["forme_name"]}
+            uncovered_species = c.execute(
+                # forme IS NOT NULL matters here, not just id != r["id"] —
+                # confirmed real: a species row with forme=NULL (like bare
+                # "Zygarde", base_species="Zygarde" on itself) is a base/
+                # default entry already correctly represented through the
+                # home_sprites form_index=0 merge above (with its real
+                # images attached). Without this filter, that same species
+                # got pulled in AGAIN here as a second, null-imaged,
+                # forme-named duplicate of the entry that already has the
+                # real picture.
+                "SELECT DISTINCT name FROM species WHERE num=? AND base_species IS NOT NULL "
+                "AND forme IS NOT NULL AND id != ? AND id != ?",
+                (r["num"], r["id"], visual["form_id"] if visual else r["id"]),
+            ).fetchall()
+            new_names = [s["name"] for s in uncovered_species if s["name"] not in covered]
+
+            # A species can already have a REAL, uncatalogued sprite for one
+            # of these new species-table-only forms — sitting in home_sprites
+            # unlabeled (forme_name=None), because the static-sprite labeling
+            # step depends on the same @pkmn/dex forme data that doesn't know
+            # these species exist either. Confirmed directly: Mega Clefable
+            # has a real preview image at form_index=1, unlabeled, while the
+            # species-table entry has the right name but no image — two
+            # entries for the same real thing rather than one. Merged here
+            # ONLY when it's unambiguous: exactly one unlabeled image-only
+            # entry and exactly one uncovered new form. A species with
+            # several unlabeled cosmetic variants (a real, separate, known
+            # gap — see README) keeps them as distinct, un-merged entries
+            # instead of risking attaching the wrong image to the wrong name.
+            unlabeled = [f for f in forms_list if f["forme_name"] is None]
+            if len(unlabeled) == 1 and len(new_names) == 1:
+                unlabeled[0]["forme_name"] = new_names[0]
+            else:
+                forms_list.extend(
+                    {"forme_name": name, "is_gmax": False, "is_shiny": False,
+                     "icon_url": None, "preview_url": None, "animated_url": None}
+                    for name in new_names
+            )
+
+            # Visual-only forms of this species: always listed (even with no species row and no
+            # picture of their own), flagged so a UI can label them, and clickable — /lookup on
+            # one answers with the base's data. With no picture of its own a form borrows the
+            # base's (normal variants only; a base picture is no stand-in for a shiny one).
+            if visual:
+                forms_list = [f for f in forms_list if f["forme_name"] != visual["form_name"]]
+            vrows = _visual_forms_for(c, r["num"])
+            if vrows:
+                b_icon, b_prev, b_anim = species_sprite(c, r["num"], None, "")
+                for v in vrows:
+                    if visual and v["form_id"] == visual["form_id"]:
+                        continue
+                    entries = [f for f in forms_list if f["forme_name"] == v["form_name"]]
+                    if not entries:
+                        entries = [{"forme_name": v["form_name"], "is_gmax": False, "is_shiny": False,
+                                    "icon_url": None, "preview_url": None, "animated_url": None}]
+                        forms_list.extend(entries)
+                    for f in entries:
+                        f["visual_only"] = True
+                        if not f["is_shiny"] and not (f["icon_url"] or f["preview_url"]):
+                            # the still is the base's; an animation of its own is kept
+                            f["icon_url"], f["preview_url"] = b_icon, b_prev
+                            f["animated_url"] = f["animated_url"] or b_anim
+                            f["image_from_base"] = True
+
+            if forms_list:
+                out["alternate_forms"] = forms_list
 
             # Gens 1 and 2 had ONE Special stat. The data layer stores it in both
             # spa and spd, which is faithful to how the simulator models it but
@@ -993,8 +1232,13 @@ def lookup(req: LookupRequest):
                         " Generation 1 also had no separate Special Defense in "
                         "damage calculation at all."
                     )
+            # Every generation's rows carry the SAME full source list (sources from Gen 3 to
+            # Gen 9 for Gardevoir, in the Gen 3 rows as well as the Gen 9 ones), so the `gen`
+            # column alone filters nothing. A source from a LATER generation cannot apply to
+            # an earlier one; only sources up to `gen` count. moves_known is distinct moves.
             out["moves_known"] = c.execute(
-                "SELECT COUNT(*) FROM learnsets WHERE species_id=? AND gen=?", (cid, gen)
+                "SELECT COUNT(DISTINCT move_id) FROM learnsets WHERE species_id=? AND gen=? "
+                "AND (source_gen IS NULL OR source_gen <= ?)", (learn_id, gen, gen)
             ).fetchone()[0]
 
             if req.moves_to_check:
@@ -1007,11 +1251,20 @@ def lookup(req: LookupRequest):
                     srcs = c.execute(
                         "SELECT method, level, source_gen FROM learnsets "
                         "WHERE species_id=? AND gen=? AND move_id=? "
+                        "AND (source_gen IS NULL OR source_gen <= ?) "
                         "ORDER BY source_gen DESC, level",
-                        (cid, gen, mh["canonical_id"]),
+                        (learn_id, gen, mh["canonical_id"], gen),
                     ).fetchall()
                     if not srcs:
                         checks[mv] = {"learns": False, "move_id": mh["canonical_id"]}
+                        # Say when the answer is "not yet" rather than "never".
+                        later = c.execute(
+                            "SELECT MIN(source_gen) FROM learnsets WHERE species_id=? AND gen=? "
+                            "AND move_id=?", (learn_id, gen, mh["canonical_id"])).fetchone()[0]
+                        if later is not None and later > gen:
+                            checks[mv]["first_learnable_gen"] = later
+                            checks[mv]["note"] = (f"Not learnable in generation {gen}; it first "
+                                                  f"becomes learnable in generation {later}.")
                         continue
                     how = []
                     for r2 in srcs:
@@ -1072,7 +1325,7 @@ def lookup(req: LookupRequest):
                         WHERE l.species_id=? AND l.gen=? AND l.method='level-up'
                           AND l.source_gen=?
                         ORDER BY l.level, m.name""",
-                    (cid, gen, gen),
+                    (learn_id, gen, gen),
                 ).fetchall()
                 out["level_up_learnset"] = [
                     {"level": r2["level"], "move": r2["name"] or r2["move_id"],
@@ -1084,8 +1337,9 @@ def lookup(req: LookupRequest):
                 others = c.execute(
                     """SELECT DISTINCT l.method, COUNT(*) n FROM learnsets l
                         WHERE l.species_id=? AND l.gen=? AND l.method != 'level-up'
+                          AND l.source_gen=?
                         GROUP BY l.method""",
-                    (cid, gen),
+                    (learn_id, gen, gen),
                 ).fetchall()
                 out["other_learn_methods"] = {r2["method"]: r2["n"] for r2 in others}
                 if not out["level_up_learnset"]:
@@ -1153,20 +1407,40 @@ def resolve_batch_images(c: sqlite3.Connection, rows: list) -> tuple[dict, dict]
         if base_rows:
             nums = list({r["num"] for r in base_rows})
             ph = ",".join("?" for _ in nums)
-            by_natdex = {}
+            # One image per natdex, chosen by the same rule species_sprite() uses. This
+            # used to assign inside the loop, so whichever row came LAST won — and an
+            # image-less animated-only row coming last overwrote a good static image with
+            # None, leaving gendered species (Rattata, the Nidoran lines) with no image
+            # in /dex_index. Rows with no image are now skipped outright.
+            best: dict[int, tuple[tuple[int, int], str]] = {}
             for hr in c.execute(
-                f"SELECT natdex, icon_path, preview_path FROM home_sprites "
+                f"SELECT natdex, gender, icon_path, preview_path FROM home_sprites "
                 f"WHERE natdex IN ({ph}) AND form_index=0 AND is_gmax=0 AND is_shiny=0",
                 nums):
-                by_natdex[hr["natdex"]] = hr["preview_path"] or hr["icon_path"]
+                url = hr["preview_path"] or hr["icon_path"]
+                if not url:
+                    continue
+                rank = (0 if hr["preview_path"] else 1, _GENDER_RANK.get(hr["gender"], 6))
+                cur = best.get(hr["natdex"])
+                if cur is None or rank < cur[0]:
+                    best[hr["natdex"]] = (rank, url)
+            by_natdex = {n: v[1] for n, v in best.items()}
             for r in base_rows:
                 if r["num"] in by_natdex:
                     home_images[r["id"]] = by_natdex[r["num"]]
 
         for r in forme_rows:
-            icon_path, preview_path = species_sprite(c, r["num"], r["forme"], r["name"])
+            icon_path, preview_path, _ = species_sprite(c, r["num"], r["forme"], r["name"])
             if icon_path or preview_path:
                 home_images[r["id"]] = preview_path or icon_path
+
+    # A visual-only form with no picture of its own shows its base species' picture: the same look.
+    vmap = _visual_form_of_map(c)
+    for r in rows:
+        if r["id"] in vmap and r["id"] not in home_images:
+            v_icon, v_prev, _ = species_sprite(c, r["num"], None, "")
+            if v_icon or v_prev:
+                home_images[r["id"]] = v_prev or v_icon
 
     images: dict[str, str] = {}
     uncovered = [r for r in rows if r["id"] not in home_images]
@@ -1181,7 +1455,7 @@ def resolve_batch_images(c: sqlite3.Connection, rows: list) -> tuple[dict, dict]
     return home_images, images
 
 
-def dex_row(r: sqlite3.Row, home_images: dict, images: dict) -> dict:
+def _dex_row_base(r: sqlite3.Row, home_images: dict, images: dict) -> dict:
     """The species-row shape shared by query_dex and dex_index."""
     return {
         "id": r["id"], "name": r["name"], "num": r["num"],
@@ -1194,6 +1468,14 @@ def dex_row(r: sqlite3.Row, home_images: dict, images: dict) -> dict:
         "required_item": r["required_item"], "forme": r["forme"],
         "image_url": home_images.get(r["id"]) or images.get(norm(r["name"])),
     }
+
+
+def dex_row(r: sqlite3.Row, home_images: dict, images: dict, visual_of: dict | None = None) -> dict:
+    """_dex_row_base, plus visual_form_of (the base species' name) on a visual-only form."""
+    row = _dex_row_base(r, home_images, images)
+    if visual_of and r["id"] in visual_of:
+        row["visual_form_of"] = visual_of[r["id"]]
+    return row
 
 
 @app.post(
@@ -1266,9 +1548,10 @@ def query_dex(req: QueryDexRequest):
             move_ids.append(mh["canonical_id"])
         placeholders = ",".join("?" for _ in move_ids)
         join = (f" AND s.id IN (SELECT species_id FROM learnsets WHERE gen = ? "
+                f"AND (source_gen IS NULL OR source_gen <= ?) "
                 f"AND move_id IN ({placeholders}) GROUP BY species_id "
                 f"HAVING COUNT(DISTINCT move_id) = ?)")
-        params += [gen] + move_ids + [len(move_ids)]
+        params += [gen, gen] + move_ids + [len(move_ids)]
 
     order = {"bst": "s.bst", "spe": "s.spe", "atk": "s.atk", "spa": "s.spa",
              "hp": "s.hp", "def": "s.def_", "spd": "s.spd", "num": "s.num"}[req.order_by]
@@ -1288,12 +1571,13 @@ def query_dex(req: QueryDexRequest):
         # this endpoint is specifically the multi-Pokemon case, so batching
         # matters more here than in /lookup's single-species path.
         home_images, images = resolve_batch_images(c, rows)
+        vmap = _visual_form_of_map(c)
 
     return {
         "count": total,
         "returned": len(rows),
         "gen": gen,
-        "results": [dex_row(r, home_images, images) for r in rows],
+        "results": [dex_row(r, home_images, images, vmap) for r in rows],
         "note": ("Legal in principle per the learnset data. Whether a move COMBINATION "
                  "is legal together still needs validate_team." if req.learns else None),
     }
@@ -1340,12 +1624,201 @@ def dex_index():
         if not rows:
             return {"count": 0, "results": [], "hint": "No data loaded yet."}
         home_images, images = resolve_batch_images(c, rows)
-        results = [dex_row(r, home_images, images) for r in rows]
+        vmap = _visual_form_of_map(c)
+        results = [dex_row(r, home_images, images, vmap) for r in rows]
 
     data = {"count": len(results), "results": results}
     _DEX_INDEX_CACHE["mtime"] = mtime
     _DEX_INDEX_CACHE["data"] = data
     return data
+
+
+# Human labels for Showdown-style format suffixes (the part after "gen<N>").
+# Anything not listed falls back to a best-effort title so an unfamiliar
+# format still shows up in the list rather than being silently dropped.
+_FORMAT_SUFFIX_LABELS = {
+    "ou": "OU", "uu": "UU", "ru": "RU", "nu": "NU", "pu": "PU", "zu": "ZU",
+    "ubers": "Ubers", "lc": "Little Cup", "cap": "CAP", "1v1": "1v1",
+    "doublesou": "Doubles OU", "monotype": "Monotype",
+    "anythinggoes": "Anything Goes", "nationaldex": "National Dex",
+    "nationaldexag": "National Dex AG", "nationaldexmonotype": "National Dex Monotype",
+    "almostanyability": "Almost Any Ability", "balancedhackmons": "Balanced Hackmons",
+    "purehackmons": "Pure Hackmons", "battlespotsingles": "Battle Spot Singles",
+    "battlespotdoubles": "Battle Spot Doubles",
+    "battlestadiumsingles": "Battle Stadium Singles", "letsgoou": "Let's Go OU",
+}
+_SPECIAL_FORMAT_LABELS = {"za": "Pokémon Legends: Z-A"}
+
+
+def _format_meta(fmt: str) -> tuple[int | None, str]:
+    """
+    (generation, human label) parsed from a Showdown-style format id.
+    The generation is always the single digit after "gen" — "gen11v1" is
+    Gen 1's 1v1, not generation 11. Formats without a "gen<N>" prefix (Z-A,
+    Champions) get generation None and sort last.
+    """
+    if fmt in _SPECIAL_FORMAT_LABELS:
+        return None, _SPECIAL_FORMAT_LABELS[fmt]
+    # Pokemon Champions formats: not a mainline generation, so generation None
+    # (they sort with the other non-generation formats) and a readable label.
+    champ = re.match(r"^gen9championsvgc(\d{4})regm([a-z])$", fmt)
+    if champ:
+        return None, f"Champions VGC {champ.group(1)} Reg M-{champ.group(2).upper()}"
+    ranked = re.match(r"^battledataregm([a-z])s(\d+)$", fmt)
+    if ranked:
+        return None, f"Champions Reg M-{ranked.group(1).upper()} S{ranked.group(2)} Battle Data"
+    m = re.match(r"^gen(\d)(.*)$", fmt)
+    if not m:
+        return None, fmt
+    gen, rest = int(m.group(1)), m.group(2)
+    vgc = re.match(r"^vgc(\d{4})(.*)$", rest)
+    if vgc:
+        label = f"VGC {vgc.group(1)}" + (f" {vgc.group(2).upper()}" if vgc.group(2) else "")
+    else:
+        label = _FORMAT_SUFFIX_LABELS.get(rest) or (rest.upper() if len(rest) <= 3 else rest.title())
+    return gen, f"Gen {gen} {label}"
+
+
+_LEARN_METHOD_ORDER = ["level-up", "machine", "tutor", "egg", "event", "dream world"]
+
+
+@app.post(
+    "/learnset",
+    operation_id="learnset",
+    summary="Every move a Pokemon learns in a generation, grouped by how (UI data feed)",
+    description=(
+        "The complete learnset for one Pokemon in one generation, grouped by method — "
+        "level-up (with levels), machine (TM/HM), tutor, egg, event and so on — each move "
+        "with its type, category, power, accuracy and effect. By default only moves from that "
+        "generation's own games; include_earlier_gens adds moves carried forward from earlier "
+        "generations. A form with no learnset of its own, and a purely visual form, answer "
+        "with the base species' learnset. Not a chat tool, not in TOOL_SCHEMAS."
+    ),
+)
+def learnset(req: LearnsetRequest):
+    gen = req.gen or DEFAULT_GEN
+    with db() as c:
+        h = resolve(req.species, kind="species")
+        if not h:
+            return {"found": False, "hint": f"Unknown Pokemon: {req.species!r}"}
+        cid = h["canonical_id"]
+        visual = _visual_form(c, cid)
+        learn_id = visual["base_id"] if visual else cid
+        r = c.execute("SELECT id, name, base_species FROM species WHERE id=? AND gen=?",
+                      (learn_id, gen)).fetchone()
+        if not r:
+            return {"found": False, "species": req.species,
+                    "hint": f"{learn_id} does not exist in generation {gen}."}
+
+        has = lambda sp: c.execute("SELECT 1 FROM learnsets WHERE species_id=? AND gen=? LIMIT 1",
+                                   (sp, gen)).fetchone()
+        sid, note = learn_id, None
+        base = norm(r["base_species"]) if r["base_species"] else None
+        if not has(sid) and base and base != sid and has(base):
+            sid = base
+            note = f"{r['name']} has no learnset of its own — this is {r['base_species']}'s."
+        if visual:
+            note = (f"{visual['form_name']} is purely a visual form of {r['name']}: this is "
+                    f"{r['name']}'s learnset.")
+
+        # Every generation's rows carry the same full source list, so `gen` alone filters
+        # nothing: source_gen is what says which generation a source belongs to.
+        src = "l.source_gen <= ?" if req.include_earlier_gens else "l.source_gen = ?"
+        where, params = f"l.species_id=? AND l.gen=? AND {src}", [sid, gen, gen]
+        available = [x[0] for x in c.execute(
+            f"SELECT DISTINCT l.method FROM learnsets l WHERE {where}", params)]
+        if req.method:
+            where += " AND LOWER(l.method)=LOWER(?)"
+            params.append(req.method)
+        rows = c.execute(
+            f"""SELECT l.move_id, l.method, l.level, l.source_gen, m.name, m.type, m.category,
+                       m.base_power, m.accuracy, m.short_desc
+                  FROM learnsets l LEFT JOIN moves m ON m.id = l.move_id AND m.gen = l.gen
+                 WHERE {where}
+                 ORDER BY l.method, l.source_gen DESC, l.level, m.name""", params).fetchall()
+
+    grouped: dict[str, list] = {}
+    seen: set = set()
+    moves: set = set()
+    for row in rows:
+        method = row["method"]
+        # Newest source first, so a repeat of the same move keeps the newest one.
+        key = (method, row["move_id"], row["level"]) if method == "level-up" else (method, row["move_id"])
+        if key in seen:
+            continue
+        seen.add(key)
+        moves.add(row["move_id"])
+        item = {"move": row["name"] or row["move_id"], "type": row["type"], "category": row["category"],
+                "power": row["base_power"], "accuracy": row["accuracy"], "effect": row["short_desc"],
+                "from_gen": row["source_gen"]}
+        if method == "level-up":
+            item["level"] = row["level"]
+        grouped.setdefault(method, []).append(item)
+    for method, items in grouped.items():
+        items.sort(key=(lambda i: (i["level"] or 0, i["move"])) if method == "level-up"
+                   else (lambda i: i["move"]))
+    order = lambda m: (_LEARN_METHOD_ORDER.index(m) if m in _LEARN_METHOD_ORDER else 99, m)
+    methods = {m: grouped[m] for m in sorted(grouped, key=order)}
+
+    out = {
+        "found": True, "species": visual["form_name"] if visual else r["name"], "gen": gen,
+        "scope": (f"moves from generation {gen} or earlier" if req.include_earlier_gens
+                  else f"moves from generation {gen}'s own games"),
+        "available_methods": sorted(available, key=order),
+        "counts": {m: len(v) for m, v in methods.items()},
+        "total_moves": len(moves),
+        "methods": methods,
+    }
+    if note:
+        out["note"] = note
+    if not rows:
+        out["hint"] = (f"No {req.method!r} moves for this Pokemon in generation {gen}."
+                       if req.method and available else
+                       f"No learnset data for this Pokemon in generation {gen}.")
+    return out
+
+
+@app.get(
+    "/formats",
+    operation_id="formats",
+    summary="Every competitive format that has data, and what kind (UI data feed)",
+    description=(
+        "Every format with at least some data — curated sets, monthly usage "
+        "statistics, or both — so a UI can offer a format selector spanning Gen 1 "
+        "through Gen 9 and cope with formats that only have sets. `usage` is null "
+        "for a format with no usage statistics; `sets` is 0 for one with none. "
+        "Not a chat tool, not in TOOL_SCHEMAS."
+    ),
+)
+def formats():
+    if not os.path.exists(DB_PATH):
+        return {"count": 0, "default": DEFAULT_FORMAT, "formats": [],
+                "hint": "No data loaded yet."}
+    with db() as c:
+        sets = {r["format"]: r["n"] for r in c.execute(
+            "SELECT format, COUNT(*) AS n FROM sets GROUP BY format")}
+        usage = {r["format"]: (r["months"], r["latest"]) for r in c.execute(
+            "SELECT format, COUNT(DISTINCT month) AS months, MAX(month) AS latest "
+            "FROM usage_stats GROUP BY format")}
+        try:
+            sources = {r["format"]: r["source"] for r in c.execute(
+                "SELECT DISTINCT format, source FROM usage_extra")}
+        except sqlite3.OperationalError:      # database predates the usage_extra table
+            sources = {}
+    out = []
+    for fmt in set(sets) | set(usage):
+        gen, label = _format_meta(fmt)
+        u = usage.get(fmt)
+        out.append({
+            "format": fmt, "gen": gen, "label": label,
+            "sets": sets.get(fmt, 0),
+            "usage": {"months": u[0], "latest": u[1]} if u else None,
+            # Who the usage numbers came from, so a UI can credit them. Usage rows
+            # with no companion record are the Smogon ladder data.
+            "source": sources.get(fmt) or ("Smogon" if u else None),
+        })
+    out.sort(key=lambda f: (f["gen"] is None, f["gen"] or 0, f["label"]))
+    return {"count": len(out), "default": DEFAULT_FORMAT, "formats": out}
 
 
 # ---------------------------------------------------------------------------
@@ -1489,6 +1962,88 @@ def search_wiki(req: SearchWikiRequest):
 # usage_stats
 # ---------------------------------------------------------------------------
 
+_SMOGON_USAGE_NOTE = (
+    "Percentages are shares within that category, not usage rates. "
+    "Checks and counters are scored 0-1; higher means a stronger check."
+)
+
+_PIKALYTICS_USAGE_NOTE = (
+    "Source: Pikalytics — credit it when quoting this. Abilities and items are shares "
+    "of that Pokemon's sets (they sum to ~100%). Move and teammate percentages are "
+    "reported as-is and do NOT sum to 100%; read them as relative popularity, not "
+    "shares. This format's data has no spread or nature data and no "
+    "checks/counters, so those are absent. usage_pct is how often the Pokemon shows "
+    "up on a team; win_rate_pct is its overall win rate; brought_pct is Pikalytics' "
+    "own figure for how often it was actually brought to the battle. A small "
+    "raw_count means a small sample."
+)
+
+
+_PIKALYTICS_NO_USAGE_NOTE = (
+    "Source: Pikalytics — credit it when quoting this. This format publishes games played, "
+    "a win rate and Pikalytics' own rank, but NO usage share: usage_pct is null and must not "
+    "be estimated from games played (the rank is not ordered by games). Abilities and items "
+    "are shares of that Pokemon's sets (about 100%); move percentages are per-move rates and "
+    "do NOT sum to 100%; teammates are listed in rank order without percentages. Spreads are "
+    "in Pokemon Champions Stat Points, not EVs. A small games count means a small sample."
+)
+_CHAMPIONS_SPREAD_UNIT = (
+    "Stat Points (Pokemon Champions: up to 32 in each stat, 66 in total) — NOT EVs. The "
+    "order is HP/Atk/Def/SpA/SpD/Spe. Natures are listed separately in `natures`."
+)
+
+
+def _usage_extra_fields(c, fmt: str, month: str, cutoff: int, sid: str) -> dict:
+    """
+    Extra fields for one species when its usage row came from a source that
+    publishes more than usage_stats has columns for (Pikalytics). Empty dict
+    for plain Smogon rows — and for a database that predates the usage_extra
+    table, rather than an error.
+    """
+    try:
+        x = c.execute(
+            "SELECT * FROM usage_extra WHERE format=? AND month=? AND cutoff=? AND species_id=?",
+            (fmt, month, cutoff, sid)).fetchone()
+    except sqlite3.OperationalError:
+        return {}
+    if not x:
+        return {}
+    out: dict = {"source": x["source"], "data_date": x["data_date"]}
+    if x["win_rate"] is not None:
+        out["win_rate_pct"] = round(x["win_rate"] * 100, 2)
+    if x["wins"] is not None and x["losses"] is not None:
+        out["record"] = f"{x['wins']}-{x['losses']}"
+    if x["brought_pct"] is not None:
+        out["brought_pct"] = round(x["brought_pct"], 2)
+    if x["mega_pct"] is not None:
+        out["mega_pct"] = round(x["mega_pct"], 2)
+    megas = json.loads(x["megas"] or "[]")
+    if megas:
+        out["megas"] = megas          # raw, exactly as Pikalytics reports it
+    leads = json.loads(x["leads"] or "[]")
+    if leads:
+        out["leads"] = leads
+    keys = x.keys()    # the natures / pika_rank columns are newer than the table itself
+    if "natures" in keys and x["natures"]:
+        natures = json.loads(x["natures"])
+        if natures:
+            out["natures"] = natures
+    if "pika_rank" in keys and x["pika_rank"] is not None:
+        out["pikalytics_rank"] = x["pika_rank"]
+    out["note"] = _PIKALYTICS_USAGE_NOTE if x["source"] == "Pikalytics" else (
+        f"Source: {x['source']}. Percentages are as reported by that source.")
+    return out
+
+
+def _usage_extra_map(c, fmt: str, month: str) -> dict:
+    try:
+        return {r["species_id"]: r for r in c.execute(
+            "SELECT species_id, source, win_rate FROM usage_extra WHERE format=? AND month=?",
+            (fmt, month))}
+    except sqlite3.OperationalError:
+        return {}
+
+
 @app.post(
     "/usage_stats",
     operation_id="usage_stats",
@@ -1507,7 +2062,16 @@ def search_wiki(req: SearchWikiRequest):
     ),
 )
 def usage_stats(req: UsageStatsRequest):
-    month = req.month or meta("stats_latest_month")
+    # Default to the latest month FOR THIS FORMAT, not one global "latest": formats
+    # from different sources are dated differently (Smogon's gen9ou is 2026-08,
+    # Pikalytics' Champions data is 2026-05), and a single global default would look
+    # for a month the format doesn't have and report it empty.
+    month = req.month
+    if not month:
+        with db() as c:
+            r = c.execute("SELECT MAX(month) FROM usage_stats WHERE format=?",
+                          (req.format,)).fetchone()
+        month = (r[0] if r and r[0] else None) or meta("stats_latest_month")
     if not month:
         return {"available": False,
                 "hint": "No usage statistics loaded. Run fetch-stats.sh then "
@@ -1529,10 +2093,10 @@ def usage_stats(req: UsageStatsRequest):
                         "hint": f"{req.species} has no entry in {req.format} for {month}. "
                                 f"It may be unused or in a different tier.",
                         "top_in_format": [x["species_name"] for x in near]}
-            return {
+            out = {
                 "available": True, "format": req.format, "month": month,
                 "cutoff": r["cutoff"], "name": r["species_name"],
-                "usage_pct": round((r["usage"] or 0) * 100, 2),
+                "usage_pct": round(r["usage"] * 100, 2) if r["usage"] is not None else None,
                 "raw_count": r["raw_count"],
                 "moves": json.loads(r["moves"]),
                 "items": json.loads(r["items"]),
@@ -1540,15 +2104,40 @@ def usage_stats(req: UsageStatsRequest):
                 "spreads": json.loads(r["spreads"]),
                 "teammates": json.loads(r["teammates"]),
                 "checks_and_counters": json.loads(r["counters"]),
-                "note": "Percentages are shares within that category, not usage rates. "
-                        "Checks and counters are scored 0-1; higher means a stronger check.",
+                "note": _SMOGON_USAGE_NOTE,
             }
+            extra = _usage_extra_fields(c, req.format, month, r["cutoff"], sid)
+            if extra:
+                out.pop("checks_and_counters", None)   # this source provides none
+                out.update(extra)
+                if r["usage"] is None:
+                    out["games"] = r["raw_count"]
+                    out["note"] = _PIKALYTICS_NO_USAGE_NOTE
+                if out.get("spreads"):
+                    out["spread_unit"] = _CHAMPIONS_SPREAD_UNIT
+            return out
 
-        rows = c.execute(
-            "SELECT species_name, usage, raw_count FROM usage_stats "
-            "WHERE format=? AND month=? ORDER BY usage DESC LIMIT ?",
-            (req.format, month, req.limit),
-        ).fetchall()
+        try:
+            # Entries without a usage share (the battle-data format) sort after any that have
+            # one, and among themselves by Pikalytics' own rank.
+            rows = c.execute(
+                "SELECT s.species_id, s.species_name, s.usage, s.raw_count, x.pika_rank AS pika_rank "
+                "FROM usage_stats s LEFT JOIN usage_extra x ON x.format=s.format AND "
+                "x.month=s.month AND x.cutoff=s.cutoff AND x.species_id=s.species_id "
+                "WHERE s.format=? AND s.month=? "
+                "ORDER BY s.usage IS NULL, s.usage DESC, x.pika_rank ASC LIMIT ?",
+                (req.format, month, req.limit),
+            ).fetchall()
+        except sqlite3.OperationalError:       # a database from before usage_extra / pika_rank
+            rows = c.execute(
+                "SELECT species_id, species_name, usage, raw_count FROM usage_stats "
+                "WHERE format=? AND month=? ORDER BY usage DESC LIMIT ?",
+                (req.format, month, req.limit),
+            ).fetchall()
+        extras = _usage_extra_map(c, req.format, month)
+        months_avail = [m[0] for m in c.execute(
+            "SELECT DISTINCT month FROM usage_stats WHERE format=? ORDER BY month",
+            (req.format,))]
 
     if not rows:
         with db() as c:
@@ -1557,16 +2146,34 @@ def usage_stats(req: UsageStatsRequest):
         return {"available": False, "format": req.format, "month": month,
                 "formats_available": fmts}
 
-    return {
+    ranking = []
+    for i, r in enumerate(rows):
+        entry = {"rank": i + 1, "name": r["species_name"],
+                 "usage_pct": round(r["usage"] * 100, 2) if r["usage"] is not None else None,
+                 "raw_count": r["raw_count"]}
+        if r["usage"] is None:
+            entry["games"] = r["raw_count"]
+            if "pika_rank" in r.keys() and r["pika_rank"] is not None:
+                entry["pikalytics_rank"] = r["pika_rank"]
+        x = extras.get(r["species_id"])
+        if x is not None and x["win_rate"] is not None:
+            entry["win_rate_pct"] = round(x["win_rate"] * 100, 2)
+        ranking.append(entry)
+    resp = {
         "available": True, "format": req.format, "month": month,
-        "ranking": [
-            {"rank": i + 1, "name": r["species_name"],
-             "usage_pct": round((r["usage"] or 0) * 100, 2),
-             "raw_count": r["raw_count"]}
-            for i, r in enumerate(rows)
-        ],
-        "months_available": meta("stats_months", []),
+        "ranking": ranking,
+        "months_available": months_avail,
     }
+    sources = {x["source"] for x in extras.values() if x["source"]}
+    if sources:
+        resp["source"] = ", ".join(sorted(sources))
+        if any(e["usage_pct"] is None for e in ranking):
+            resp["ranked_by"] = "Pikalytics' own rank (this format publishes no usage share)"
+            resp["note"] = _PIKALYTICS_NO_USAGE_NOTE
+        else:
+            resp["note"] = ("Source: " + resp["source"] + " — credit it when quoting this. "
+                            "usage_pct is how often a Pokemon shows up on a team.")
+    return resp
 
 
 @app.post(
@@ -1832,6 +2439,83 @@ def common_generation(req: CommonGenerationRequest):
 
 
 @app.post(
+    "/get_locations",
+    operation_id="get_locations",
+    summary="Where a Pokemon can be found, per generation and game",
+    description=(
+        "Where a Pokemon can be caught, evolved, or obtained in the main-series "
+        "games, organised by generation and game — Bulbapedia's own per-generation "
+        "location tables, parsed into structured data. Filter by gen or game (e.g. "
+        "'Crystal'). Games that share a location are grouped together. A form "
+        "(Alolan Raichu, a Mega) returns its base species' locations. Use this for "
+        "'where do I find X'; use search_wiki only for detail this doesn't cover. "
+        "Side games and event distributions are not included."
+    ),
+)
+def get_locations(req: GetLocationsRequest):
+    with db() as c:
+        h = resolve(req.species, kind="species")
+        sid = h["canonical_id"] if h else norm(req.species)
+        info = c.execute(
+            "SELECT name, base_species FROM species WHERE id=? ORDER BY gen DESC LIMIT 1",
+            (sid,)).fetchone()
+        name = info["name"] if info else req.species
+
+        # Locations are keyed by the base species (that's what Bulbapedia's page
+        # is about), so a form falls back to its base species' rows.
+        note = None
+        try:
+            base_sid = norm(info["base_species"]) if info and info["base_species"] else sid
+            if base_sid != sid and not c.execute(
+                    "SELECT 1 FROM species_locations WHERE species_id=? LIMIT 1", (sid,)).fetchone():
+                note = (f"{name} is a form of {info['base_species']} — these are "
+                        f"{info['base_species']}'s locations.")
+                sid = base_sid
+
+            sql = "SELECT gen, game, location FROM species_locations WHERE species_id=?"
+            params: list = [sid]
+            if req.gen is not None:
+                sql += " AND gen=?"
+                params.append(req.gen)
+            if req.game:
+                sql += " AND LOWER(game) LIKE ?"
+                params.append(f"%{req.game.lower()}%")
+            rows = c.execute(sql + " ORDER BY gen, seq", params).fetchall()
+            available = [] if rows else [r[0] for r in c.execute(
+                "SELECT DISTINCT gen FROM species_locations WHERE species_id=? ORDER BY gen",
+                (sid,))]
+        except sqlite3.OperationalError:
+            return {"found": False, "query": req.species,
+                    "hint": "Location data hasn't been ingested yet "
+                            "(run ingest.py --locations-only)."}
+
+    if not rows:
+        if available:
+            hint = (f"No matches for that filter. {name} has location data for "
+                    f"generation(s) {', '.join(str(g) for g in available)}.")
+        else:
+            hint = (f"No location data for {name}. Check the name, or it may have no "
+                    f"catchable locations in the main-series games.")
+        return {"found": False, "query": req.species, "hint": hint}
+
+    # Group games that share a location within a generation (Red/Blue, Gold/Silver)
+    # — mirrors the source table and reads far better than one row per game.
+    by_gen: dict[int, dict[str, list[str]]] = {}
+    for r in rows:
+        by_gen.setdefault(r["gen"], {}).setdefault(r["location"], []).append(r["game"])
+    return {
+        "found": True,
+        "species": name,
+        "note": note,
+        "generations": [
+            {"gen": g, "entries": [{"games": games, "location": loc}
+                                   for loc, games in locs.items()]}
+            for g, locs in by_gen.items()
+        ],
+    }
+
+
+@app.post(
     "/query_items",
     operation_id="query_items",
     summary="Browse or filter held items",
@@ -2043,7 +2727,7 @@ TOOL_SCHEMAS = [
         "parameters": SearchWikiRequest.model_json_schema()}},
     {"type": "function", "function": {
         "name": "usage_stats",
-        "description": "Smogon competitive usage statistics for a format.",
+        "description": "Competitive usage statistics for a format: Smogon ladder data for the standard tiers, and Pikalytics data for Pokemon Champions formats (e.g. gen9championsvgc2026regmc, the current Champions ladder).",
         "parameters": UsageStatsRequest.model_json_schema()}},
     {"type": "function", "function": {
         "name": "validate_team",
@@ -2076,6 +2760,14 @@ TOOL_SCHEMAS = [
                        "type_matchup, lookup. Not needed for a single named Pokemon "
                        "or a team with no specific seed.",
         "parameters": CommonGenerationRequest.model_json_schema()}},
+    {"type": "function", "function": {
+        "name": "get_locations",
+        "description": "Where a Pokemon can be found in the main-series games, by "
+                       "generation and game (Bulbapedia's location tables as "
+                       "structured data). Use for 'where do I find / catch X'. "
+                       "Filter by gen or game. A form returns its base species' "
+                       "locations. Side games and events are not included.",
+        "parameters": GetLocationsRequest.model_json_schema()}},
     {"type": "function", "function": {
         "name": "query_items",
         "description": "Browse or filter held items — a quick reference when building a "
@@ -2115,7 +2807,8 @@ statistics.
 
 PRECEDENCE WHEN SOURCES DISAGREE
 - Legality, learnsets, base stats, type matchups: the dex tools win.
-- Anime, manga, TCG, characters, lore, game locations: the wiki wins.
+- Anime, manga, TCG, characters, lore: the wiki wins. Game locations: get_locations
+(structured, per generation and game) wins; the wiki only for detail it doesn't cover.
 - Current metagame: usage statistics win, but they describe what people play, not
 what is optimal.
 
@@ -2130,6 +2823,8 @@ team downstream.
 - lookup or query_dex for exact data. search_wiki for prose. usage_stats for the
 metagame.
 - type_matchup for ANY type effectiveness question.
+- get_locations for "where do I find / catch X". Pass gen or game when the user
+names one; otherwise it returns every generation.
 - get_sets before recommending how to build a Pokémon. Quote a real named set
 rather than inventing four moves.
 - query_items when discussing item choice for a build — browse by is_choice/
@@ -2145,6 +2840,28 @@ validate_team parsed the team, review_team will parse it too.
 - validate_team on every team you propose, before showing it. Never show an
 illegal team.
 - calc_damage for any damage question. Never estimate.
+
+SPECIES FROM LEGENDS Z-A / CHAMPIONS
+- If lookup's response includes a sim_note field, say so plainly before doing
+anything else with that species — it means the stats/typing/ability are real
+(sourced from Bulbapedia) but calc_damage, validate_team, review_team, and
+compare_teams will all fail on it, since the actual battle engine has no record
+of it. Don't attempt one of those tools on it and report a generic error; say
+upfront that it isn't supported for that species specifically.
+- Champions competitive usage: call usage_stats with format gen9championsvgc2026regmc
+  (the current ladder) or battledataregmbs3 (the M-B season-3 battle data). Both come
+  from Pikalytics — name it as the source when you quote it, and go by the response's
+  own note about which percentages are shares and which are not. The month is whatever
+  the response says (it may be older than the Smogon data). The VGC format has usage
+  percentages, win rates and how often a Pokemon is brought, but no spreads or natures.
+  battledataregmbs3 is the reverse: it has NO usage share (usage_pct is null — never
+  estimate one from games played), only games, win rate, a Pikalytics rank and builds.
+  Its spreads are in Champions Stat Points (up to 32 per stat, 66 total), NOT EVs, and
+  its natures are listed separately. Legends Z-A has no usage data at all — say so
+  rather than substituting another format's numbers.
+- A lookup result with visual_only true is a purely cosmetic form (Pikachu's caps, Antique
+  Sinistea...): answer from its data as the base species' and mention once, briefly, that the
+  form is visual only (visual_form_note). Never present it as having different stats or moves.
 
 IMAGES
 - If the user wants to SEE a Pokemon — "show me X", "what does X look like", "picture
@@ -2204,6 +2921,7 @@ HANDLERS = {
     "type_matchup": lambda a: type_matchup(TypeMatchupRequest(**a)),
     "get_sets": lambda a: get_sets(GetSetsRequest(**a)),
     "common_generation": lambda a: common_generation(CommonGenerationRequest(**a)),
+    "get_locations": lambda a: get_locations(GetLocationsRequest(**a)),
     "query_items": lambda a: query_items(QueryItemsRequest(**a)),
 }
 ASYNC_HANDLERS = {
@@ -2531,7 +3249,8 @@ async def chat(req: ChatRequest):
                         "weak": v.get("weak", []), "resist": v.get("resist", []),
                         "immune": v.get("immune", []),
                         "item": v.get("item"), "ability": v.get("ability"),
-                        "nature": v.get("nature"), "moves": v.get("moves")}
+                        "nature": v.get("nature"), "moves": v.get("moves"),
+                        "animated_url": v.get("animated_url")}
 
             yield _sse("done", {
                 "sources": sources, "turns": turns,
