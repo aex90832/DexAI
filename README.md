@@ -9,7 +9,6 @@ A self-hosted Pokémon knowledge base you can talk to. Ask anything (games, anim
 TCG, competitive VGC) and it uses authoritative sources instead of
 whatever the model hallucinates. Supports desktop and mobile.
 
-
 **Note:** DexAI is an unofficial, non-commercial fan project. Not affiliated with Nintendo or The Pokémon Company. See [Disclaimer & License](#license--disclaimer) below.
 
 <img width="1539" height="916" alt="Dex1" src="https://github.com/user-attachments/assets/bd174669-99a2-4091-ad28-f862d15cbc4a" />
@@ -25,6 +24,23 @@ This started from having my son and nephew asking me tons of questions as they h
 
 This guide assumes **nothing is set up**. Every step has sub-steps depending on what
 you already run. Skip the ones that don't apply
+
+---
+
+## Updates
+
+### [2026-09-29]
+* **NEW:** Added Pikalytics data as a source for competitive data for ZA and Champions.
+* **NEW:** Added animated sprites
+* **NEW:** Added location data.
+* **NEW:** Front end now allows you to select competitive data for every generation.
+* **FIX:** Scrollbar is now styled and not ugly.
+* **FIX:** Parsing of sprites/animations for alternate forms (Pikachu, Zygarde, Raichu).
+  * *Note: Still working on Vivillon.*
+
+### [2026-09-24]
+* Initial Release.
+
 
 ---
 
