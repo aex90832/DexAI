@@ -54,6 +54,7 @@ you already run. Skip the ones that don't apply
 21. [Maintenance and upgrading](#maintenance-and-upgrading)
 22. [Caveats for shared or public deployments](#caveats-for-shared-or-public-deployments)
 23. [File manifest](#file-manifest)
+24. [Known gaps](#known-gaps)
 
 ---
 
@@ -127,23 +128,25 @@ narrow in some places, and knowing where saves disappointment later.
 
 | Tool | Answers | Backed by |
 |---|---|---|
-| `lookup` | Stats, typing, abilities, evolution, "can X learn Y", **level-up learnsets with levels**, species images (including shiny) | Showdown dex, HOME sprites |
+| `lookup` | Stats, typing, abilities, evolution, "can X learn Y", **level-up learnsets with levels**, species images (including shiny and animated). A purely visual form (Pikachu's caps, Antique Sinistea...) answers with its base species' data plus a note saying so | Showdown dex, HOME sprites |
 | `query_dex` | "Which Pokémon are X and also Y" | Showdown dex |
 | `type_matchup` | "What's super effective against Steel/Fairy" | Type chart, per generation |
-| `search_wiki` | Anime, manga, TCG, locations, events, mechanics, lore | Bulbapedia |
-| `usage_stats` | What's used in a metagame, with what, countered by what | Smogon ladder data |
+| `search_wiki` | Anime, manga, TCG, events, mechanics, lore (game locations: see `get_locations`) | Bulbapedia |
+| `usage_stats` | What's used in a metagame, with what, countered by what; for Pokémon Champions also win rate and how often a Pokémon is actually brought | Smogon ladder data; Pikalytics for the Champions formats |
 | `get_sets` | Real named Smogon sets | Showdown teambuilder |
 | `validate_team` | Is this team legal in this format | Showdown TeamValidator |
 | `calc_damage` | Damage range and KO chance for one attack | `@smogon/calc` |
 | `review_team` | Structural problems with one team | Derived |
 | `compare_teams` | Head-to-head structure of two teams | Derived |
 | `common_generation` | The highest generation that includes every one of 2+ named Pokémon together — call this first for any team built around specific named Pokémon, since not every Pokémon exists in every generation | Showdown dex |
+| `get_locations` | Where a Pokémon can be found, per generation and game — filter by `gen` or `game`; a form returns its base species' locations. Main-series games only | Bulbapedia location tables, parsed from raw article HTML |
 | `query_items` | Held item reference for team-building — filter by Choice/berry/Mega Stone/type-boost/stat-boost, or free-text search for anything else (orbs, weather rocks, terrain seeds, gems, plates, general items) | Showdown dex + Bulbapedia |
 
 `pokedex-api` also serves a few REST routes that aren't in this list because
-they're not something the model calls — `GET /dex_index` is the main one, a
-full species-and-forms feed built for a UI's Pokédex browse view rather than
-a chat answer. See `pokedex-ai-API.md` for the complete REST surface,
+they're not something the model calls — `GET /dex_index` is a full
+species-and-forms feed built for a UI's Pokédex browse view, and `GET /formats`
+lists every competitive format that has sets or usage data (Gen 1 through
+Gen 9) to drive a UI's format selector — neither is a chat answer. See `pokedex-ai-API.md` for the complete REST surface,
 tool-callable or not.
 
 ### Answers well
@@ -156,9 +159,9 @@ tool-callable or not.
   for a full level-up learnset and you get it ordered by level, with each move's
   type, power and effect — the actual question someone playing through a game
   has. Requires the generation to be in your build scope (section 4).
-- **Legality.** It runs Showdown's validator, so "is this team legal" has a
+- **Legality.** It runs Showdown's real validator, so "is this team legal" has a
   correct answer, not an opinion.
-- **Damage.** Realtime calculations, not estimates.
+- **Damage.** Real calculations, not estimates.
 - **Metagame description.** What's popular, what checks what, how usage moved
   over the months you've fetched.
 - **Team structure.** Missing roles, shared weaknesses, speed tiers, coverage
@@ -225,6 +228,7 @@ knowing which is which is the whole reason the answers can be trusted.
 | **Smogon usage stats** | What people actually play, by format and month | HTTP fetch during ingest | `usage_stats` | `usage_stats` |
 | **Smogon analyses** | Why sets work — roles, spreads, checks and counters | HTTP fetch during ingest | `wiki_chunks`, tagged `source='smogon'` | `search_wiki` |
 | **Smogon sets** | Curated named sets: moves, item, ability, nature, EVs, Tera | `fetch-sets.sh` from Showdown's mirror | `sets` | `get_sets` |
+| **Pikalytics** | Pokémon Champions ladder usage: moves, items, abilities, teammates, win rate | `fetch-pikalytics.py` on a machine with internet, then read from disk | `usage_stats` + `usage_extra` | `usage_stats` |
 
 Everything lands in one SQLite file at `/data/pokedex.db`. No Postgres, no vector
 database, no extra containers.
@@ -327,6 +331,60 @@ what people play, not what's optimal. Popular is not the same as good, and the
 bottom of the usage table is full of perfectly viable Pokémon nobody bothers with.
 The system prompt should keep the model from confusing the two.
 
+### 3.3b — Pikalytics (Pokémon Champions usage)
+
+**What it gives you.** Ladder usage for Pokémon Champions, which Smogon doesn't
+publish: per Pokémon, its usage, win rate and record, how often it is actually
+brought to a battle, its moves, items, abilities and teammates, and how often it
+is used as a Mega. Two formats are fetched by default, both verified to return real data, but the data is of two kinds:
+
+- `gen9championsvgc2026regmc` (the current VGC ladder) publishes a **usage share**, win rate,
+  how often a Pokémon is brought, leads and Mega share — but no spreads or natures.
+- `battledataregmbs3` (the M-B season 3 battle data) is the reverse: **no usage share** at
+  all, but games played, wins and losses, a Pikalytics rank, and real builds — spreads and
+  natures. Its `usage_pct` is `null` and the API says so; it is ranked by Pikalytics' own
+  rank, which is *not* ordered by games played (a rank-3 Pokémon has more games than rank 1),
+  so no usage number is ever derived from the games count. Its teammate lists carry ranks
+  without percentages and are returned in rank order.
+
+**Its spreads are Stat Points, not EVs.** Pokémon Champions replaced EVs with Stat Points,
+up to 32 in each stat and 66 in all, and the spreads (`2/32/0/0/0/32`, in HP/Atk/Def/SpA/
+SpD/Spe order) sum to that. The response says so in `spread_unit`. Do not compare them
+with the Smogon EV spreads (252/0/4/...), or convert between the two.
+
+**How it's captured.** `fetch-pikalytics.py`, run on any machine with internet,
+writes one JSON file per format into `pikalytics/`; `ingest.py --pikalytics-only`
+then loads them into the same `usage_stats` table the Smogon data lives in, so
+the `usage_stats` tool works on Champions formats unchanged. See Step 2e.
+
+**Caveats — read these before trusting a number.**
+
+- **The endpoints are undocumented.** Pikalytics' documented AI interface only
+  exposes each format's top 50. The full roster comes from the same `/api/`
+  endpoints the site's own pages call, which are not a published interface and
+  can change without notice. The fetcher is deliberately gentle (an honest
+  User-Agent, two-second gaps, about two requests per format) and fails loudly —
+  and writes nothing — if the answer looks wrong. No terms-of-use or rate-limit
+  statement was found either way.
+- **Credit Pikalytics.** It asks to be credited. Every Champions `usage_stats`
+  response carries `source: "Pikalytics"` and the system prompt tells the model
+  to name it.
+- **Not every percentage is the same kind of number.** Ability and item
+  percentages are shares that sum to about 100. Move and teammate percentages
+  do not (one Pokémon's top ten moves added to 166%). The response's `note` says
+  so, and the ingest log prints the check on real data.
+- **What isn't there.** The VGC data has no spreads or natures (the fields are empty in the
+  file; the battle-data format does have them). Neither format's "counters" list is ingested: it gives
+  a win percentage and a game count but never says whose win rate it is, and the
+  samples are tiny (19 games for the top entry on one Pokémon).
+- **It can be old.** Each format's own page states a "Data Date". At the time of
+  writing (September 2026) the Champions data was dated 2026-05. `usage_stats`
+  reports the month it is actually using.
+- **Legends Z-A has no usage data anywhere.** Pikalytics lists a `za` format, but
+  every value in it is a `-1%` placeholder, so it is not ingested.
+- **Not for the battle tools.** Like the Z-A Megas, Champions formats aren't in
+  the simulator, so `validate_team` and `calc_damage` don't work with them.
+
 ### 3.4 — Smogon strategy analyses
 
 **What it gives you.** The written analyses from Smogon's Strategy Dex — why a set
@@ -341,6 +399,8 @@ by source when a question is clearly competitive or clearly not.
 **How it's referenced.** `search_wiki`, same as Bulbapedia content.
 
 ### 3.5 — The alias table (how the sources get joined)
+
+This is the least glamorous part of the system and the most load-bearing.
 
 The same Pokémon has a different name in every source:
 
@@ -388,7 +448,8 @@ They will disagree. The rules, which are encoded in the system prompt:
 |---|---|---|
 | Legality, learnsets, base stats, type matchups | **Showdown** | Executable code, continuously maintained |
 | Anime, manga, TCG, characters, lore | **Bulbapedia** | Showdown has no concept of these |
-| Game locations, encounter rates, event distributions | **Bulbapedia** | Showdown only models battles |
+| Where a Pokémon can be found, per generation and game | **`get_locations`** | Bulbapedia's own location tables, parsed into structured data |
+| Encounter rates, event distributions | **Bulbapedia** (`search_wiki`) | Showdown only models battles |
 | "What's good right now", tier placement | **Smogon usage** | It's literally a measurement |
 | How a mechanic works | **Showdown**, explained by **Bulbapedia** | Bulbapedia's prose is clearer; Showdown's numbers are correct |
 
@@ -405,6 +466,9 @@ Showdown is run by a simulator that would break if it were wrong.
 - **Talk and user pages.** Filtered out during ingest as noise.
 - **Pokémon GO and mobile spinoff data.** Only what Bulbapedia happens to cover.
 - **Live ladder data.** Usage statistics are monthly snapshots, not real time.
+- **Legends Z-A ranked usage.** No source publishes it (Pikalytics' `za` entry is placeholder data).
+- **Champions counters, and spreads for the VGC format.** Counters have no defined meaning and tiny samples; only the battle-data format publishes spreads — see 3.3b.
+- **Sprites for Totem Pokémon.** Pokémon HOME has none, so the 12 Totem forms have no image.
 - **Anything after your ZIM's build date.** The system does not reach out to the
   live Bulbapedia.
 
@@ -412,7 +476,9 @@ Showdown is run by a simulator that would break if it were wrong.
 
 ## 4. Build scope — mini, standard, full
 
-The wizard asks how many Pokémon generations to index.
+The wizard asks how many Pokémon generations to index. This is the single
+biggest decision about what the system can answer, and the easiest one to
+regret, so it's worth understanding before you pick.
 
 ### Why generations matter
 
@@ -443,9 +509,14 @@ Concretely, with generation 3 indexed you can ask:
 - *"What were Alakazam's base stats in gen 1?"* — one Special stat, not two
 
 Without that generation indexed, each of those falls back to wiki prose or
-simply isn't answerable. Learnset entries store the method too — level-up,
-TM/HM, tutor, egg, event — so "how do I get this move" is answered as precisely
-as "can I get it".
+simply isn't answerable. Learnset entries store the method too — level-up, `machine` (TM/HM), tutor, egg, event, `dream world` — so "how do I get this move" is answered as precisely as "can I get it".
+
+**How learnsets are stored, and the rule for reading them.** Every generation's rows carry the species' *complete* source list: Gardevoir's Gen 3 and Gen 9 rows are identical, with sources from Gen 3 through Gen 9 in both. The `gen` column alone therefore filters nothing; `source_gen` says which generation a source belongs to. The API applies two rules:
+
+- **What a generation's games offered** (`POST /learnset`, and the level-up list and method counts in `lookup`): `source_gen = gen`.
+- **Whether a Pokémon can learn a move by a generation** (`moves_to_check`, `query_dex` with `learns`, `moves_known`): `source_gen <= gen` — a source from a later generation can never apply.
+
+Reading `gen` without `source_gen` gives wrong answers, such as a Gen 3 Gardevoir with 320 TM entries and a Gen 5 Dream World move.
 
 ### The three scopes
 
@@ -514,8 +585,7 @@ About a minute. Nothing else is touched.
 
 ### Disk cost of a wider scope
 
-Modest. Learnsets are the bulk of it — roughly 63,000 rows for one generation
-and around 350,000 for all nine. That's a few hundred megabytes on top of a
+Modest. Learnsets are the bulk of it — about 1.7 million rows for all nine generations at the time of writing (`/health` reports the live figure), because each generation stores the species' full source list. That's a few hundred megabytes on top of a
 database already measured in gigabytes because of the wiki. Scope is a time
 decision far more than a space decision.
 
@@ -542,7 +612,7 @@ Radeon AI PRO R9700 (32GB, gfx1201).
 all land in the same 28–36/s range. The bottleneck is serial — Python-side
 tokenization and per-item overhead, not compute — so a bigger CPU host doesn't
 help here. If you have any spare GPU, even a modest one, it's almost always
-worth it.
+worth using.
 
 **`gpu-small` vs `gpu-big` is about how much concurrent request-handling
 overhead a card can absorb, not raw VRAM.** For a 33M-parameter model like the
@@ -550,8 +620,8 @@ default, the GPU forward pass is nearly instant — the real cost is the HTTP
 round-trip and JSON handling around it. A bigger card handles more requests
 in flight before that overhead becomes the bottleneck. Pushing `gpu-big`'s
 concurrency past 16 kept helping in testing (GPU utilization was still only
-39%), so if you have real headroom, `EMBED_CONCURRENCY` can be raised even
-more — see the environment variable reference.
+39%), so if you have real headroom, `EMBED_CONCURRENCY` is worth raising
+further — see the environment variable reference.
 
 ### Picking one
 
@@ -825,6 +895,8 @@ rather than trusting the flags.
 
 ### 3.6 — Verify it's actually offline
 
+The honest test is to block egress and use it.
+
 Temporarily deny the containers outbound internet — a firewall rule on the host, or
 pulling the WAN cable — then run the Step 9.3 test prompts. If all five answer
 normally, you're offline-clean.
@@ -863,6 +935,8 @@ The venv and `node_modules` are architecture-specific — stage on the same plat
 nothing tries to reinstall.
 
 ### 3.8 — What you lose by going fully offline
+
+Being honest about the trade:
 
 - **Usage statistics go stale** between manual refreshes. A three-month-old
   metagame picture is usually fine; during a tier shift it isn't.
@@ -1004,7 +1078,7 @@ wizard worked.
 > Skip if you ran the wizard — it offers to create these for you.
 
 ```bash
-mkdir -p /mnt/Apps/pokedex/{api,sim,data,ui,stats,zim,sprites/icons,sprites/previews,openwebui}
+mkdir -p /mnt/Apps/pokedex/{api,sim,data,ui,stats,pikalytics,zim,sprites/icons,sprites/previews,sprites/animated,openwebui}
 ```
 
 Adjust `/mnt/Apps` to wherever you keep app data. If you change it, change it
@@ -1017,9 +1091,11 @@ everywhere in the compose file too.
 ├── data/         pokedex.db                                (created by ingest)
 ├── ui/           index.html                                (optional)
 ├── zim/          bulbapedia_*.zim                          (Step 2)
+├── pikalytics/   Champions usage JSON from fetch-pikalytics.py  (Step 2e, optional)
 ├── sprites/
 │   ├── icons/    Pokemon HOME icon PNGs                     (Step 2b, optional)
-│   └── previews/ Pokemon HOME preview PNGs                  (Step 2b, optional)
+│   ├── previews/ Pokemon HOME preview PNGs                  (Step 2b, optional)
+│   └── animated/ Animated sprite GIFs                       (Step 2b, further optional)
 └── openwebui/    Open WebUI's data                         (only if using bundled)
 ```
 
@@ -1162,6 +1238,45 @@ pattern), but no reason to carry it along:
 find /mnt/Apps/pokedex/sprites -iname "Thumbs.db" -delete
 ```
 
+### Animated sprites (further optional)
+
+A third, independently-sourced folder of animated GIFs, using a different and
+much simpler naming convention than the icons/previews above:
+
+```
+0006_charizard_base_normal.gif
+0006_charizard_mega-x_shiny.gif
+0026_raichu_alola_normal.gif
+0003_venusaur_female_shiny.gif
+```
+
+`{dex:04d}_{species-slug}_{form-slug}_{variant}.gif` — National Dex number,
+species name as a lowercase hyphenated slug, a form slug (`base` for the
+default form, otherwise a Mega/regional/etc. form name — `mega`, `mega-x`,
+`mega-y`, `alola`, and so on), and `normal`/`shiny`.
+
+One naming quirk worth understanding rather than working around: `female` is
+**not** a form slug the way `mega`/`alola` are, even though it looks like one.
+A hyphenated form slug (Mega, Alola, Galar...) names a genuinely different
+battle entity with its own stats/typing/ability. `female` names a purely
+cosmetic difference — same species, same stats, just a different in-game
+sprite for female individuals (Venusaur, Butterfree, and a handful of others
+have a visibly different female appearance with zero mechanical difference).
+The ingest stage treats these as two different things internally; you don't
+need to do anything differently when placing the files; it's mentioned here
+so a `female` file showing up where you might expect a form name doesn't look
+like a mistake.
+
+This source has its own coverage gap: no Gigantamax animations exist in it at
+all. That's a property of the source archive, not something ingest can fix —
+species with only a Gigantamax form (or only a Gigantamax-and-base pairing)
+simply won't have an animated option, and the frontend's static/animated
+toggle correctly doesn't appear for them.
+
+```bash
+cp /path/to/your/animated/*.gif /mnt/Apps/pokedex/sprites/animated/
+```
+
 ### Compose file additions
 
 Add to `pokedex-api`'s `environment` and `volumes` (Step 5):
@@ -1170,14 +1285,19 @@ Add to `pokedex-api`'s `environment` and `volumes` (Step 5):
     environment:
       HOME_ICONS_DIR: /sprites/icons
       HOME_PREVIEWS_DIR: /sprites/previews
-      # The public URL these two get served at — this container mounts them as
-      # static routes at /sprites/icons and /sprites/previews (see main.py), and
-      # this MUST match those mount paths exactly, or the URLs written into the
-      # database at ingest time will point at a route that doesn't exist.
+      # Animated sprites (optional, independent of the above — see "Animated
+      # sprites" just above). Omit this line entirely if you don't have one.
+      HOME_ANIMATED_DIR: /sprites/animated
+      # The public URL these get served at — this container mounts them as
+      # static routes at /sprites/icons, /sprites/previews, and (if configured)
+      # /sprites/animated (see main.py), and this MUST match those mount paths
+      # exactly, or the URLs written into the database at ingest time will
+      # point at a route that doesn't exist.
       HOME_SPRITES_URL: http://<HOST_IP>:8990/sprites     # <<< your host IP
     volumes:
       - /mnt/Apps/pokedex/sprites/icons:/sprites/icons:ro
       - /mnt/Apps/pokedex/sprites/previews:/sprites/previews:ro
+      - /mnt/Apps/pokedex/sprites/animated:/sprites/animated:ro
 ```
 
 ### Running the ingest for it
@@ -1189,14 +1309,17 @@ re-run any time you update the sprite archive:
 sudo docker exec pokedex-api /app/.venv/bin/python /app/ingest.py --sprites-only
 ```
 
-This does two things: parses every filename in both folders (skipping anything
-that doesn't match, reporting the count so you can sanity-check coverage), and
-resolves each species' alternate forms against `pokedex-sim`'s own dex data to
-label them correctly where possible (e.g. recognizing that a given Mega
-Evolution's sprite is specifically "Charizard-Mega-X" and not just "some
-Charizard variant"). That labeling isn't always resolvable — cosmetic-only
+This does two things: parses every filename in all three folders (skipping
+anything that doesn't match, reporting the count so you can sanity-check
+coverage), and resolves each species' alternate forms against `pokedex-sim`'s
+own dex data to label them correctly where possible (e.g. recognizing that a
+given Mega Evolution's sprite is specifically "Charizard-Mega-X" and not just
+"some Charizard variant"). That labeling isn't always resolvable — cosmetic-only
 variants in particular sometimes have real images but no confirmed form name —
-the summary output reports how many were confidently labeled versus not.
+the summary output reports how many were confidently labeled versus not, and
+for the animated folder specifically, how many filenames parsed but named a
+form that couldn't be matched to anything in the current dex data (this
+happens for content newer than what `pokedex-sim` knows about — see Step 2d).
 
 Verify it worked:
 
@@ -1205,11 +1328,285 @@ curl -s -X POST http://<HOST_IP>:8990/lookup -H 'Content-Type: application/json'
   -d '{"name":"Charizard"}' | python3 -m json.tool | grep -A2 sprite
 ```
 
-Want real URLs for `sprite_icon_url`/`sprite_preview_url`, not `null`.
+Want real URLs for `sprite_icon_url`/`sprite_preview_url`, not `null`. If you
+configured `HOME_ANIMATED_DIR`, the response also carries `animated_url` (and
+`sprite_shiny_animated_url` for the shiny variant) — `null` is the correct,
+expected answer for anything with no animated file, not a sign something's
+broken.
+
+### How forms get their names — and how to fix one
+
+A static sprite's filename says which form it is only as a number:
+
+```
+poke_capture_0019_000_md_n_00000000_f_n.png
+             │dex│form│gen│ │costume│  │shiny (n normal / r shiny)
+```
+
+`form` is Pokémon HOME's own form number. `gen` is a gender code: `mf` (same for
+both sexes), `md` / `fd` (the male / female look of a species whose sexes differ),
+`mo` / `fo` (male-only / female-only species), `uk` (genderless).
+
+**The labelling rule.** Form N gets the Nth name in the species' merged
+`otherFormes` list from the simulator's dex (position N is labelled form_index
+N+1). That is a guess about HOME's numbering, and it holds for most species. It
+fails where HOME numbers differently from Showdown — confirmed for Greninja
+(HOME has one Ash/Bond form, Showdown two names), Floette, Zygarde, Magearna and
+Tatsugiri, and Pikachu, where HOME numbers the caps 001–007 and 009 while the simulator lists the Cosplay forms first, so the rule labelled the caps as Cosplay Pikachu; and Minior, where HOME's form 0 is the Meteor Form (the in-game default) but the simulator's plain "Minior" is the Core, so the same picture must serve both `Minior` and `Minior-Meteor` — and it can't name anything the simulator doesn't know about (the Legends Z-A Megas). A form the rule can't name stays *unlabeled*, never guessed. **A wrong label is harder to spot than a missing one**: it never appears in the list of Pokémon without an image, so if a form's name looks odd, check it with `sprite_dump.py`.
+
+**Which row an animation joins.** An animated filename has no gender. The ingest
+files it under the gender of the static row that already exists for that form,
+preferring `mf`, `md`, `mo`, `fo`, `uk`, then `fd` last. So Rattata's base
+animation lands on its male (`md`) row and its `female` animation on the `fd` row,
+and a female-only species like Nidorina gets its animation on the `fo` row. Every
+lookup picks "the" sprite by that same order: the male look is the default of a
+species whose sexes differ; the female look is a variant.
+
+**Z-A Megas.** These have no `otherFormes` entry, so a Mega's row is *created* from
+its animated file (named from the species table), and its static picture is
+merged in afterwards. The merge is deliberately cautious: it only pairs a Mega
+with a static sprite when the number of candidate *forms* equals the number of
+Mega names, and it never guesses between siblings. Dimorphic Megas that ship a
+male and a female file (Staraptor) count as one form and keep both. Everything
+ambiguous is resolved by hand, below.
+
+**Fixing one by hand.** Confirmed answers live in a handful of small tables in `ingest.py`. Only add an entry after looking at the images;
+several first guesses in the sprite-naming plan were wrong.
+
+| Table | What it says | Current entries |
+|---|---|---|
+| `CONFIRMED_FORM_INDEX_OVERRIDES` | This `(dex, form_index)` static sprite is this named form. Merges into the animated row of that name, or labels the sprite in place if there isn't one. | Zygarde 004 Complete / 005 Mega; Greninja 001 Mega; Magearna 002 Mega / 003 Original Color Mega; Floette 005 Mega / 006 Eternal; Tatsugiri 003 / 004 / 005 Curly / Droopy / Stretchy Mega; Minior 007–013 Red / Orange / Yellow / Green / Blue / Indigo / Violet |
+| `HOME_FORME_ORDER_OVERRIDES` | HOME's own form order for a species, replacing the simulator's. Position N is HOME form N+1; `None` marks a number HOME skips. Both the still labels and the animation matching follow it. | Pikachu: 001 Original, 002 Hoenn, 003 Sinnoh, 004 Unova, 005 Kalos, 006 Alola, 007 Partner, (008 skipped), 009 World |
+| `HOME_FORM_REMAP` | HOME's form 0 isn't the look the dex should default to, so renumber its forms before anything is labeled. | None at present (Minior was tried and reverted: its form 0, the Meteor Form, is the in-game default) |
+| `SHARED_SHINY_STILL` | These forms have no shiny still of their own and share another named form's. | Minior's colours share the one "Shiny Core" (Red's shiny) |
+| `BASE_FORM_ALSO_NAMED` | The default form is also a named form the simulator treats separately; its rows are copied under that name. | Minior: form 0 (Meteor Form) is also `Minior-Meteor` |
+| `CONFIRMED_SAME_FORM` | Two Showdown names are one HOME form; the second gets a copy of the first's sprite. | Greninja-Ash / Greninja-Bond |
+| `ZA_MEGA_FORM_VARIANTS` | One parsed Mega has several forms sharing its stats; each gets its own named row. | Tatsugiri-Mega → Droopy and Stretchy |
+| `ANIMATED_SLUG_SYNONYMS` | An animated slug names a form the species table has under a plainer name. | Tatsugiri `mega-curly` → the plain Mega; Pikachu `<cap>-cap` → the cap's own name |
+
+The workflow:
+
+```bash
+docker cp sprite_dump.py pokedex-api:/tmp/sprite_dump.py
+docker exec pokedex-api /app/.venv/bin/python /tmp/sprite_dump.py 978      # the dex number
+```
+
+`sprite_dump.py` prints the simulator's forme order, every `home_sprites` row, the
+static and animated files on disk, and any files carrying a non-zero costume code.
+Open the images to decide which file is which, add one line to the right table,
+then `--za-megas-only` (if a species row is involved) followed by `--sprites-only`.
+That order matters: the sprite stage reads the Mega species rows.
+
+Things learned the hard way, worth knowing before you go looking:
+
+- A Z-A Mega's static sprite ships as a **preview with no icon**. A leftover icon
+  under the same number usually belongs to an older form and will be inherited by
+  the Mega row, so rename it.
+- DLC Megas have **no shiny** static or animated sprites.
+- If a form number on disk collides with an existing form, the sprite-naming tool
+  (per its own notes) keeps one file and lists the other in a duplicates report.
+  Check there first when a form seems to be missing.
+- The static row key ignores the **costume code**, so two files that differ only by costume would share a row and one would silently win. No species has been found to do this (Pikachu's caps, the suspected case, turned out to be ordinary form numbers); `sprite_dump.py` flags any that do.
 
 ---
 
-## Step 3 — A chat model endpoint
+## Step 2c — Legends Z-A / Champions Mega Evolutions (optional)
+
+New Mega Evolutions introduced in Pokemon Legends: Z-A (including its Mega
+Dimension DLC, shared with Pokemon Champions) — around 45 new Megas that
+don't exist in `@pkmn/dex`/`pokedex-sim` at all yet, since Showdown's own
+data only covers Gens 1-9. This stage parses them directly out of Bulbapedia,
+which already has real, structured tables for both the base stats and the
+species/type/ability/Mega Stone details — no external fetch needed beyond the
+ZIM you already have.
+
+### Requirements
+
+`stage_wiki` must have already run (`--wiki-only` or a full build) — this
+stage reads from `wiki_chunks`, it doesn't touch the ZIM directly.
+
+### Running it
+
+```bash
+sudo docker exec pokedex-api /app/.venv/bin/python /app/ingest.py --za-megas-only
+```
+
+Fast — a couple of seconds, since it's pure SQL/regex work against
+already-ingested text, no external fetching. Deletes and re-inserts its own
+batch each run, so it's safe to re-run any time (for instance, after a wiki
+re-ingest picks up content that wasn't there before — see the note below).
+
+The log reports how many parsed successfully versus were skipped, and why:
+a species whose Bulbapedia page only has its own regular stat block (the
+Mega hasn't had its stats published there yet) is skipped rather than
+inserted with wrong data, same for a page that can't be found at all under
+the expected title.
+
+### Species with more than one Mega
+
+Bulbapedia's table gives a species a second row with no dex number when it has a
+second Mega, and the same shape is used for something that isn't a Mega at all,
+so the parser tells them apart by the row's first cell:
+
+- **Empty first cell** (Raichu's Mega Y): a real second Mega. It gets its own row.
+  Its stats are the *last* stat block on the species page and the first Mega's
+  are the one before it — Raichu's page has five blocks, and reading "the last"
+  for both would have given Mega X Mega Y's stats.
+- **A name in the first cell** (Meowstic Female): a gender-specific ability note,
+  skipped.
+
+One parsed Mega can also have several forms with identical stats. Tatsugiri's
+Curly, Droopy and Stretchy Megas all share 68/65/90/135/125/92 (every source
+checked agrees), so the stage writes the parsed row as `Tatsugiri-Mega` and copies
+it to `Tatsugiri-Droopy-Mega` and `Tatsugiri-Stretchy-Mega`, each findable by
+name. New entries go in `ZA_MEGA_FORM_VARIANTS`.
+
+Each Mega gets its own self-alias, so it's findable without re-running the alias
+stage, and is tagged with its base species' newest generation. That matters for
+species removed from later games: Zygarde has no Gen 9 data, so its Mega is
+tagged Gen 8 — `/lookup` matches the generation exactly, and one tagged 9 would
+be unreachable alongside Zygarde's own forms.
+
+### Real limitation, not a bug: these don't work with the battle-simulator tools
+
+These new Mega rows live entirely in this project's own `species` table,
+sourced from Bulbapedia — `pokedex-sim`'s real `@pkmn/sim` battle engine has
+no knowledge of them at all, since nothing here touches its own data.
+`lookup`/`query_dex` work fine; `calc_damage`, `validate_team`, `review_team`,
+and `compare_teams` will all fail on any of them, since the simulator's own
+dex has no such species. `/lookup`'s response carries a `sim_note` field for
+exactly these species, saying so plainly — the system prompt tells the model
+to surface it upfront rather than let one of those tools fail with a generic
+error.
+
+### A note on data freshness
+
+This stage is only as good as what's already in `wiki_chunks`. If Bulbapedia's
+own article for a species gets updated with new content (a newly-published
+Mega stat chart, for instance) and you haven't re-run `--wiki-only` since,
+this stage will see the old, incomplete version even though the ZIM file
+itself is unchanged — the ZIM parses correctly every time it's read fresh,
+but `wiki_chunks` is a stored snapshot from whenever `stage_wiki` last ran,
+not the ZIM itself. If a species you'd expect to work is being skipped,
+re-running `--wiki-only` before `--za-megas-only` is worth trying before
+assuming it's a real gap in the source.
+
+---
+
+## Step 2d — Per-generation game locations (optional)
+
+Where each Pokémon can be found in the main-series games, by generation and game,
+behind the `get_locations` tool. It's parsed from the **raw HTML** of each
+Bulbapedia species page, not from `wiki_chunks`: the flattened chunk text loses
+the table structure (which games share a location) that this needs.
+
+```bash
+sudo docker exec pokedex-api /app/.venv/bin/python /app/ingest.py --locations-only
+```
+
+About two minutes. It needs the `species` table (for matching article titles and
+for each species' debut generation, so nothing is recorded for a generation
+before a species existed), deletes and re-inserts its own rows, and is safe to
+re-run. The summary reports rows per generation and lists any article that
+matched no species — anime characters and category pages are expected there.
+Side games, events and promotions are not included.
+
+Note that `get_locations` (like `lookup`) takes a `gen`, and a species that isn't
+in that generation's data is reported as not found: Rattata is in Gens 1–7 only.
+
+---
+
+## Step 2e — Champions usage from Pikalytics (optional)
+
+Usage, win rates and builds for the Pokémon Champions ladder. Read section 3.3b
+first — the endpoints involved are undocumented and the data has real limits.
+
+Like the Smogon statistics, fetching and ingesting are separate: the ingest never
+touches the network. Run the fetcher anywhere with internet and Python 3 (it uses
+only the standard library), pointing at the folder the container mounts:
+
+```bash
+python3 fetch-pikalytics.py --out /mnt/Apps/pokedex/pikalytics
+```
+
+Per format it reads the data month from Pikalytics' own page (never guessed), then
+makes one request for the whole roster — each entry already carries that Pokémon's
+full record — and falls back to a per-Pokémon request only for an entry that
+arrives without one. Files are written atomically as `<format>-<cutoff>-<YYYY-MM>.json`.
+It skips a format it already has for the current month, and treats an empty answer
+as a failure that writes nothing (this API answers `200 []` for a wrong key), so a
+good file is never overwritten by a bad fetch.
+
+| Option | |
+|---|---|
+| `--formats a,b` | Format codes. Default: the two verified ones. |
+| `--cutoff 1760` | Rating cutoff(s). 1760 is the value verified to return data. |
+| `--delay 2` | Seconds between requests. |
+| `--force` | Refetch even if the month's file exists. |
+| `--probe` | Test which format codes respond, and write nothing. |
+
+Then load it (run `--aliases-only` first if you haven't, so names resolve to species
+ids):
+
+```bash
+sudo docker exec pokedex-api /app/.venv/bin/python /app/ingest.py --pikalytics-only
+```
+
+The container needs `PIKALYTICS_DIR: /pikalytics` and the mount
+`/mnt/Apps/pokedex/pikalytics:/pikalytics:ro` (the wizard adds both; see Step 5).
+The log reports entries per format, any duplicate spellings collapsed (the roster
+lists Sirfetch'd three times), names that match no species row (cosmetic forms
+mostly; kept anyway), and a sanity line showing that item shares sum to about
+100% while move percentages don't.
+
+Verify:
+
+```bash
+curl -s -X POST http://<HOST_IP>:8990/usage_stats -H 'Content-Type: application/json' \
+  -d '{"format":"gen9championsvgc2026regmc","species":"Rillaboom"}' | python3 -m json.tool | head -30
+curl -s http://<HOST_IP>:8990/formats | python3 -m json.tool | grep -B2 -A6 Pikalytics
+```
+
+Want `source: "Pikalytics"`, a `win_rate_pct`, and a `month` that is the format's
+own (not necessarily the Smogon month). It runs monthly at most; there is nothing
+to gain from fetching more often.
+
+---
+
+## Step 2f — Extra species and visual-only forms (optional)
+
+Two small curated tables in `ingest.py`, applied by
+`ingest.py --extra-forms-only` (run it after `--aliases-only`; it's also part of a
+full build).
+
+**`EXTRA_SPECIES`** adds species the simulator's dex dump lacks but that have their
+own data. Currently Floette-Eternal (AZ's Floette): 74/65/67/125/128/92, Fairy,
+Flower Veil, verified against several independent sources. It is added for every
+generation Floette exists in.
+
+**`VISUAL_ONLY_FORMES`** lists forms that differ from their base species only in
+appearance — Pikachu's caps, Pichu-Spiky-eared, Antique Sinistea and Polteageist,
+Artisan Poltchageist, Masterpiece Sinistcha, and Minior's seven core colours, Red included (the Meteor Form is not one: it has different stats, and it is the dex default). A visual form:
+
+- is **clickable**: `/lookup` on it succeeds even when no species row exists;
+- answers with the **base species' data** — stats, typing, abilities, learnset,
+  evolution — while keeping its own name and its own picture if it has one;
+- says so in the response: `visual_only: true`, `visual_form_of`, and a short
+  `visual_form_note`;
+- borrows the base species' still, with `image_from_base: true`, when it has none of its own — keeping an animation of its own if it has one — and never as a stand-in for a shiny;
+- is listed, flagged `visual_only`, in its base species' `alternate_forms`, and
+  tagged `visual_form_of` in `/dex_index` and `/query_dex`.
+
+The list is curated on purpose. Identical stats, typing and abilities are necessary
+but not sufficient: the Cosplay Pikachus match Pikachu's stats but each has a
+unique move, and Rockruff-Dusk is ability-related, not visual. The ingest log
+therefore prints the forms whose data *is* identical to their base as candidates to
+review. To add one, confirm it really is only cosmetic, add `"Form-Name": "Base"`,
+run `--extra-forms-only`, and check `/lookup` on it.
+
+Sprites for these come from the same pipeline as everything else. Where a form has a still of its own (all of Pikachu's caps do) it is used; where it doesn't, the base picture is shown instead.
+
+---
 
 > The wizard asks for your base URL and model name, lists what your server reports,
 > and runs the tool-calling test in 3.6 automatically. Read this section to
@@ -1222,7 +1619,7 @@ calling**. This stack does not provide one.
 
 Your model server must **parse tool calls out of the model's output and return them
 as structured JSON**. A model that "supports function calling" in principle will
-still fail if the server wasn't launched with the right parser. I have been using a special Qwen3.8-Flash-Next deployment based on this (https://huggingface.co/tcclaviger/Qwen3.8-Flash-Next-MXFP4-FP8-GPTQ) but any tool calling capable model should work. I also tried the the 27B model. It worked, but is more likely to diverge from the truth and "story tell." 
+still fail if the server wasn't launched with the right parser.
 
 The failure mode is quiet: the model answers your Pokémon question from its own
 memory, never calls a tool, and sounds perfectly confident. Section 3.6 catches this
@@ -1476,6 +1873,7 @@ services:
       # --- offline operation (section 3) -----------------------------------
       OFFLINE: "1"                   # never fetch anything at query time
       STATS_DIR: /stats              # read Smogon JSON from disk, not the web
+      PIKALYTICS_DIR: /pikalytics    # Champions usage JSON from fetch-pikalytics.py (Step 2e, optional)
       HF_HOME: /data/models          # embedding model cached on the volume
       HF_HUB_OFFLINE: "1"            # override to 0 for the FIRST ingest only
       TRANSFORMERS_OFFLINE: "1"
@@ -1491,9 +1889,12 @@ services:
 
       # --- Pokemon HOME sprites (Step 2b, optional) -------------------------
       # Species images fall back to Bulbapedia's article artwork without
-      # these — delete all three lines if you're not using the sprite pack.
+      # these — delete lines you're not using.
       HOME_ICONS_DIR: /sprites/icons
       HOME_PREVIEWS_DIR: /sprites/previews
+      # HOME_ANIMATED_DIR: /sprites/animated             # <<< further optional,
+                                                           #     independent of
+                                                           #     the two above
       HOME_SPRITES_URL: http://<HOST_IP>:8990/sprites  # <<< must match this
                                                          #     container's own
                                                          #     host:port + the
@@ -1514,9 +1915,11 @@ services:
       - /mnt/Apps/pokedex/zim:/zim:ro        # <<< IF USING THE BUNDLED KIWIX
       # - /mnt/Apps/kiwix/library:/zim:ro    # <<< IF USING YOUR OWN KIWIX (swap these)
       - /mnt/Apps/pokedex/stats:/stats:ro    #     pre-downloaded Smogon JSON (3.4)
-      # --- Step 2b, optional: delete both lines if not using the sprite pack ---
+      - /mnt/Apps/pokedex/pikalytics:/pikalytics:ro   # Champions usage JSON (Step 2e, optional)
+      # --- Step 2b, optional: delete lines you're not using ---
       - /mnt/Apps/pokedex/sprites/icons:/sprites/icons:ro
       - /mnt/Apps/pokedex/sprites/previews:/sprites/previews:ro
+      # - /mnt/Apps/pokedex/sprites/animated:/sprites/animated:ro   # <<< further optional
     command: >
       sh -c "if [ ! -f /app/.venv/.installed ]; then
                python -m venv /app/.venv &&
@@ -1706,7 +2109,7 @@ For a 2.4 GB ZIM, the finished database should show roughly:
 | `species` | 800–1,000 | Gen 9 only by default, not the full National Dex |
 | `moves` | ~685 | Gen 9 legal moves |
 | `abilities` | ~310 | |
-| `learnsets` | ~60,000 | One row per species-move pair |
+| `learnsets` | ~1.7 million (all nine generations) | One row per species, generation, move, method, level and source generation. Every generation stores the species' *full* source list, so the same fact repeats once per generation and `source_gen` is what places a source in time (see below). |
 | `wiki_chunks` | ~440,000 | ~180,000 per GB of ZIM |
 | `wiki_chunks_linked` | **~20%** | See below |
 | `aliases` | ~130,000 | ZIM redirects plus dex names |
@@ -1726,6 +2129,8 @@ docker exec pokedex-api /app/.venv/bin/python ingest.py --stats-only
 docker exec pokedex-api /app/.venv/bin/python ingest.py --wiki-only
 docker exec pokedex-api /app/.venv/bin/python ingest.py --sprites-only   # Step 2b
 docker exec pokedex-api /app/.venv/bin/python ingest.py --item-categories-only
+docker exec pokedex-api /app/.venv/bin/python ingest.py --za-megas-only  # Step 2c
+docker exec pokedex-api /app/.venv/bin/python ingest.py --locations-only # Step 2d
 ```
 
 `--sprites-only` is fast (seconds, not minutes) and safe to re-run any time the
@@ -1738,14 +2143,35 @@ already been run at least once (it reads from both `items` and `wiki_chunks`);
 running it against an empty database just logs that nothing was found rather
 than erroring.
 
+`--za-megas-only` parses Bulbapedia's Legends Z-A / Champions Mega Evolution
+tables (already sitting in `wiki_chunks`) into new rows in the `species`
+table — fast, and safe to re-run any time; it deletes and re-inserts its own
+batch each run. Requires `--wiki-only` to have already run. Worth re-running
+after any `--wiki-only` re-ingest, since a species that was previously skipped
+for missing stats may now resolve if Bulbapedia's article for it changed.
+
+`--locations-only` builds the `species_locations` table behind `get_locations`. Unlike the
+other Bulbapedia stages it does **not** read `wiki_chunks`: it reads each species
+page's raw HTML straight from the ZIM, because the flattened chunk text loses
+the table structure this needs. Each generation is a nested table whose rows are
+one or more game-name cells followed by a location cell, so games in the same row
+share a location. It takes about 2 minutes, deletes and re-inserts its own rows
+each run, and is safe to re-run any time. Requires the `species` table
+(`--dex-only`) for matching article titles to species IDs and for each species'
+debut generation — rows for a generation before a species existed are dropped.
+Only the main-series section is parsed; side games and events are excluded. The
+summary reports rows per generation and lists any article titles that matched
+no species (anime characters and category pages are expected there). It also
+runs as part of a full build, after the alias stage.
+
 **Schema migrations run automatically, every time.** Any run of `ingest.py` —
 full or partial — checks the database's actual column set against what the
 current code expects and adds anything missing via `ALTER TABLE ADD COLUMN`
 before doing any other work. This means upgrading to a newer version of
 `ingest.py`/`main.py` that adds a new column never requires deleting and
 rebuilding the database from scratch — just copy in the new files and run
-`--dex-only` (or whichever partial stage touches the changed table). Note:
-`ALTER TABLE ADD COLUMN` always appends the new
+`--dex-only` (or whichever partial stage touches the changed table). One
+real wrinkle worth knowing: `ALTER TABLE ADD COLUMN` always appends the new
 column at the table's *physical* end, regardless of where it's written in the
 `CREATE TABLE` text — so any code that writes to that table with a bare
 `INSERT ... VALUES (...)` (positional, no column list) will silently write
@@ -2015,7 +2441,7 @@ Ask these in order. Each exercises a different path:
 | "How does my team do against this one?" | `compare_teams` |
 | "Build me a rain team for gen9ou without Pelipper" | multi-step + `validate_team` |
 
-Two that should be **refused or reframed**:
+Two that should be **refused or reframed**, and are worth checking:
 
 | Prompt | Correct behaviour |
 |---|---|
@@ -2058,7 +2484,7 @@ is equally "part of the team":
 - **Same team member, different battle state.** Species like Aegislash that
   automatically switch forms mid-battle (Stance Change, Disguise, and similar
   abilities) aren't a different Pokémon and aren't optional the way a Mega
-  Evolution is — so a card for the alternate form gets its own
+  Evolution is — so a card for the alternate form gets its own honestly-labeled
   section instead of being folded into the team count or treated as an
   unrelated mention.
 - **Also mentioned, not part of the team.** A threat example ("Weavile
@@ -2103,7 +2529,8 @@ All on `pokedex-api`.
 | `KIWIX_BOOK` | Yes | ZIM book name — filename **without** `.zim` | `bulbapedia_en_all_maxi` |
 | `HOME_ICONS_DIR` | No | Pokemon HOME icon PNGs, as seen **inside** the container (Step 2b) | `/sprites/icons` |
 | `HOME_PREVIEWS_DIR` | No | Pokemon HOME preview PNGs, as seen **inside** the container (Step 2b) | `/sprites/previews` |
-| `HOME_SPRITES_URL` | No | Public URL prefix for both, written into the database at ingest time. Must exactly match where this container actually serves `/sprites/icons` and `/sprites/previews`. | `http://192.168.1.50:8990/sprites` |
+| `HOME_ANIMATED_DIR` | No | Animated sprite GIFs, as seen **inside** the container (Step 2b, "Animated sprites") — independent of the two above, no Gigantamax coverage in this source | `/sprites/animated` |
+| `HOME_SPRITES_URL` | No | Public URL prefix for all of the above, written into the database at ingest time. Must exactly match where this container actually serves `/sprites/icons`, `/sprites/previews`, and (if configured) `/sprites/animated`. | `http://192.168.1.50:8990/sprites` |
 | `SIM_URL` | Yes | Node sidecar. Always the container name. | `http://pokedex-sim:8991` |
 | `OPENAI_BASE_URL` | Yes | Chat model endpoint, **including** `/v1` | `http://192.168.1.50:8000/v1` |
 | `OPENAI_MODEL` | Yes | Exact name from `/v1/models` | `qwen2.5-14b-instruct` |
@@ -2124,6 +2551,7 @@ All on `pokedex-api`.
 | `INGEST_LOG` | No | Where `ingest.py` writes its log | `/data/ingest.log` |
 | `OFFLINE` | No | Never fetch anything at query time | `1` |
 | `STATS_DIR` | No | Read Smogon JSON from disk instead of the web | `/stats` |
+| `PIKALYTICS_DIR` | No | Champions usage JSON written by `fetch-pikalytics.py`, as seen inside the container (Step 2e). Unset or empty just skips that ingest stage. | `/pikalytics` |
 | `HF_HOME` | No | Embedding model cache location | `/data/models` |
 | `HF_HUB_OFFLINE` | No | Block HuggingFace calls. Set `0` for the first ingest. | `1` |
 | `TRANSFORMERS_OFFLINE` | No | Same, for the transformers library | `1` |
@@ -2134,6 +2562,15 @@ All on `pokedex-api`.
 
 | Symptom | Cause | Fix |
 |---|---|---|
+| `/lookup` says "X does not exist in generation 9" for a Pokémon that clearly exists (Rattata, Nidorina, Zygarde) | `/lookup` matches the generation exactly and the default is 9; the species isn't in that generation's data. `/dex_index` rows carry no generation, so a grid can't tell. | Pass the species' own `gen` (Rattata 7, Nidorina 8, Zygarde 8), or call `common_generation` first |
+| A gendered species (Rattata, Nidorina, Staraptor) has no image, or defaults to its female sprite | Old ingest filed its animation on a separate image-less `mf` row, and lookups picked between the male and female rows arbitrarily | Current `ingest.py` and `main.py`, then `ingest.py --sprites-only` |
+| A Z-A Mega has an animation but no picture | Its static sprite couldn't be paired safely (several unlabeled candidates, or no animated file to merge into) | Step 2b, "Fixing one by hand": `sprite_dump.py`, then one line in `CONFIRMED_FORM_INDEX_OVERRIDES` |
+| A Z-A Mega's animation is filed under the wrong Mega, or is missing | Its animated slug carries a token the species-table name lacks (`mega-curly` vs `Tatsugiri-Mega`) | Add the slug to `ANIMATED_SLUG_SYNONYMS` |
+| `fetch-pikalytics.py` prints "FAILED — nothing written" | The API answers `200 []` for a wrong format code, cutoff or date, and the fetcher treats that as failure | Check the code with `--probe`; try `--cutoff`; the site may have changed |
+| `usage_stats` for a Champions format reports no entry for a month | Older versions used one global "latest month" | Current `main.py` defaults to the latest month *for that format* |
+| Pikalytics ingest logs names that "match no species row" | Cosmetic forms (Alcremie flavours, Vivillon patterns, Furfrou trims) and the like | Expected; the rows are kept. Add an alias only if it's a real species |
+| A cosmetic form isn't clickable, or `/lookup` says it isn't found | It isn't in `VISUAL_ONLY_FORMES`, or `--extra-forms-only` hasn't run | Step 2f |
+| An older-generation lookup says a Pokémon learns a move that didn't exist then, or its method counts are huge | Older `main.py` read the learnsets table without `source_gen` (every generation stores the full source list) | Current `main.py`; no re-ingest needed |
 | A script that restarts a container and immediately runs a command against it fails with "Connection refused" or "Connection reset by peer" | `docker restart` returns as soon as the restart is *initiated*, not once the process inside has actually finished starting and bound its port — a command that follows immediately can beat it | Add a short sleep, poll the container's `/health` until it responds, or just retry the failed command once the container's had a few seconds |
 | Model answers Pokémon questions without calling tools | Tool parsing not enabled on the model server | Step 3.6. vLLM needs `--enable-auto-tool-choice --tool-call-parser`; llama.cpp and lemonade need `--jinja` |
 | Raw `<tool_call>` tags appear in the answer | Server received the call but didn't parse it | Wrong `--tool-call-parser` for the model family, or missing chat template |
@@ -2167,6 +2604,7 @@ All on `pokedex-api`.
 | `npm install` runs on every restart | `node_modules` not persisting | Confirm the `sim` bind mount is read-write, not `:ro` |
 | Container hangs on start with no logs | `HF_HUB_OFFLINE` set but the model was never downloaded | Run the first ingest with `-e HF_HUB_OFFLINE=0` (Step 7) |
 | Ingest fails at the stats stage | `STATS_DIR` set but empty, or no internet and `STATS_DIR` unset | Pre-download per section 3.4, or unset `STATS_DIR` and allow egress once |
+| `animated_url`/`sprite_shiny_animated_url` in a response return a real-looking URL, but fetching it 404s even though the file genuinely exists on disk | `main.py` was reading `HOME_ICONS_DIR`/`HOME_PREVIEWS_DIR` and mounting those two as static routes, but never read `HOME_ANIMATED_DIR` or mounted a third route for it — the database had the right URL, the file was really there, there was just no HTTP route registered to serve it | Fixed — confirm `main.py` mounts all three (`/sprites/icons`, `/sprites/previews`, `/sprites/animated`); if only two, it's running an older build |
 | Everything works, then breaks after a restart with no internet | `pip` or `npm` re-running on start | Apply the sentinel-file commands from section 3.2 |
 | `usage_stats` returns nothing for a format | That format has no file at your chosen rating cutoff | Check what exists at `smogon.com/stats/YYYY-MM/chaos/` — cutoffs vary by format |
 
@@ -2187,6 +2625,11 @@ rewriting, so refreshing one never forces a rebuild of the others.
 | **Changing build scope** | `ingest.py --dex-only` | 15–90 min | No |
 | Updated/expanded sprite archive | `ingest.py --sprites-only` | Seconds | No |
 | New Bulbapedia ZIM changes item category articles | `ingest.py --item-categories-only` | Seconds | No |
+| New Legends Z-A / Champions Mega revealed on Bulbapedia | `ingest.py --za-megas-only` | Seconds | No |
+| New Bulbapedia ZIM, or new species added to the dex | `ingest.py --locations-only` | ~2 min | No |
+| New Pikalytics month (Champions) | `fetch-pikalytics.py`, then `ingest.py --pikalytics-only` | ~10 s + seconds | No |
+| Edited `EXTRA_SPECIES` / `VISUAL_ONLY_FORMES` | `ingest.py --extra-forms-only` | Seconds | No |
+| Edited a sprite override table | `ingest.py --za-megas-only` (if a species row is involved), then `--sprites-only` | Seconds | No |
 | New Bulbapedia ZIM | `ingest.py --wiki-only` | ~1 hour+ | Yes, all of them |
 | Everything | `ingest.py` | Full build | Yes |
 
@@ -2274,7 +2717,7 @@ scarce.
 - **`pokedex-api` has no authentication.** It's designed to sit on a trusted LAN
   behind Open WebUI. Anyone who can reach port 8990 can query it.
 - **Do not expose 8990 to the internet.** If you need remote access, put it behind
-  Tailscale, a VPN, or an authenticating reverse proxy. Open WebUI has auth; the
+  Tailscale, a VPN, or an authenticating reverse proxy. Open WebUI has real auth; the
   tool server does not.
 - If you use a hosted model API, the text of every conversation — including tool
   results — goes to that provider. Your ZIM and database stay local.
@@ -2311,6 +2754,12 @@ library.kiwix.org and let them build their own database.
 | `*.zim` | `/mnt/Apps/pokedex/zim/` | Bulbapedia snapshot |
 | `poke_icon_*.png` | `/mnt/Apps/pokedex/sprites/icons/` | Pokemon HOME icons (Step 2b, optional) |
 | `poke_capture_*.png` | `/mnt/Apps/pokedex/sprites/previews/` | Pokemon HOME preview art (Step 2b, optional) |
+| `{dex}_{species}_{form}_{variant}.gif` | `/mnt/Apps/pokedex/sprites/animated/` | Animated sprites (Step 2b, further optional, no Gigantamax) |
+| `fetch-pikalytics.py` | anywhere with internet | Pikalytics downloader (Step 2e, optional) |
+| `<format>-<cutoff>-<YYYY-MM>.json` | `/mnt/Apps/pokedex/pikalytics/` | Champions usage snapshots written by the fetcher |
+| `sprite_dump.py` | copy into the container when needed | Read-only diagnostic for the sprite pipeline (Step 2b) |
+
+---
 
 ---
 
