@@ -54,7 +54,6 @@ you already run. Skip the ones that don't apply
 21. [Maintenance and upgrading](#maintenance-and-upgrading)
 22. [Caveats for shared or public deployments](#caveats-for-shared-or-public-deployments)
 23. [File manifest](#file-manifest)
-24. [Known gaps](#known-gaps)
 
 ---
 
