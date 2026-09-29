@@ -52,7 +52,6 @@ you already run. Skip the ones that don't apply
 19. [Environment variable reference](#environment-variable-reference)
 20. [Troubleshooting](#troubleshooting)
 21. [Maintenance and upgrading](#maintenance-and-upgrading)
-22. [Caveats for shared or public deployments](#caveats-for-shared-or-public-deployments)
 23. [File manifest](#file-manifest)
 
 ---
@@ -2695,40 +2694,6 @@ The `.venv` and `node_modules` directories are disposable if you have internet t
 rebuild them — but keep them if you're air-gapped, since they can't be recreated
 offline. The ZIM is large and re-downloadable; back it up only if bandwidth is
 scarce.
-
----
-
-## Caveats for shared or public deployments
-
-### Licensing and attribution
-
-- **Bulbapedia** content is CC BY-NC-SA 2.5 — attribution, non-commercial,
-  share-alike. Personal and community use is fine. Do not build a commercial product
-  on it. `search_wiki` responses cite article titles by design, which is what
-  attribution looks like in practice.
-- **Smogon** usage statistics and analyses are Smogon's. Credit them visibly if you
-  publish anything built on this.
-- **Pokémon** itself is Nintendo / Creatures / GAME FREAK intellectual property. This
-  is a fan tool. Don't sell it, don't imply endorsement.
-
-### Security
-
-- **`pokedex-api` has no authentication.** It's designed to sit on a trusted LAN
-  behind Open WebUI. Anyone who can reach port 8990 can query it.
-- **Do not expose 8990 to the internet.** If you need remote access, put it behind
-  Tailscale, a VPN, or an authenticating reverse proxy. Open WebUI has real auth; the
-  tool server does not.
-- If you use a hosted model API, the text of every conversation — including tool
-  results — goes to that provider. Your ZIM and database stay local.
-- Leave `WEBUI_AUTH: "True"` on. Turning it off makes Open WebUI open to anyone on
-  the network.
-
-### Redistribution
-
-You can share the compose file, `server.js`, `ingest.py`, and `main.py` freely —
-they're your code and configuration. **Don't redistribute the ZIM or the built
-`pokedex.db`**, which contain Bulbapedia's content. Point people at
-library.kiwix.org and let them build their own database.
 
 ---
 
