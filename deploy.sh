@@ -520,6 +520,71 @@ fi
 ZIM_BOOK="${ZIM_FILENAME%.zim}"
 
 # ---------------------------------------------------------------------------
+# 3b. Pokemon HOME sprites (optional)
+# ---------------------------------------------------------------------------
+
+head1 "Pokemon HOME sprites (optional)"
+
+note "Official artwork and icons for every species, including shiny variants"
+note "and known alternate forms. Entirely optional — without this, species"
+note "images fall back to whatever Bulbapedia's own article artwork the ZIM"
+note "extraction found, which is present but visually inconsistent."
+echo
+note "This isn't fetched by anything here — you need an existing archive of"
+note "Pokemon HOME's own sprite assets, as two folders of PNGs (icons and"
+note "previews) using Pokemon HOME's own filename scheme. See the README,"
+note "'Step 2b', for the exact naming convention if you're not sure your"
+note "archive matches it."
+
+if confirm "Do you have a Pokemon HOME sprite archive to use?"; then
+  BUNDLE_SPRITES=1
+  echo
+  ask SPRITES_ICONS_DIR    "Directory of icon PNGs"    "$INSTALL_ROOT/sprites/icons"
+  ask SPRITES_PREVIEWS_DIR "Directory of preview PNGs" "$INSTALL_ROOT/sprites/previews"
+
+  if [ -d "$SPRITES_ICONS_DIR" ]; then
+    __sprite_count="$(find "$SPRITES_ICONS_DIR" -maxdepth 1 -iname '*.png' 2>/dev/null | wc -l | tr -d ' ')"
+    if [ "$__sprite_count" -gt 0 ]; then
+      ok "Found $__sprite_count PNG(s) in $SPRITES_ICONS_DIR"
+    else
+      warn "No PNGs found there yet — that's fine if you're placing them before first run,"
+      note "  but nothing will show up until they're actually in that folder."
+    fi
+  else
+    warn "$SPRITES_ICONS_DIR doesn't exist yet — it'll need to before you run ingest.py --sprites-only."
+  fi
+
+  echo
+  note "Animated sprites (GIFs) are a separate, independently optional source —"
+  note "icons/previews above work fine with none. No Gigantamax coverage exists"
+  note "in this format as of this writing; that's a real gap in the source, not"
+  note "a bug here."
+  if confirm "Do you also have an animated sprite archive?"; then
+    BUNDLE_ANIMATED=1
+    ask SPRITES_ANIMATED_DIR "Directory of animated GIFs" "$INSTALL_ROOT/sprites/animated"
+    if [ -d "$SPRITES_ANIMATED_DIR" ]; then
+      __anim_count="$(find "$SPRITES_ANIMATED_DIR" -maxdepth 1 -iname '*.gif' 2>/dev/null | wc -l | tr -d ' ')"
+      if [ "$__anim_count" -gt 0 ]; then
+        ok "Found $__anim_count GIF(s) in $SPRITES_ANIMATED_DIR"
+      else
+        warn "No GIFs found there yet — same as above, fine if you're placing them before first run."
+      fi
+    else
+      warn "$SPRITES_ANIMATED_DIR doesn't exist yet — it'll need to before you run ingest.py --sprites-only."
+    fi
+  else
+    BUNDLE_ANIMATED=0
+    SPRITES_ANIMATED_DIR=""
+  fi
+else
+  BUNDLE_SPRITES=0
+  SPRITES_ICONS_DIR=""
+  SPRITES_PREVIEWS_DIR=""
+  BUNDLE_ANIMATED=0
+  SPRITES_ANIMATED_DIR=""
+fi
+
+# ---------------------------------------------------------------------------
 # 4. chat model
 # ---------------------------------------------------------------------------
 
@@ -746,6 +811,14 @@ ev() { printf '%s="%s"\n' "$1" "$2"; }
   ev KIWIX_URL    "$KIWIX_URL"
   [ -n "$KIWIX_PORT" ] && ev KIWIX_PORT "$KIWIX_PORT" || true
   echo
+  if [ "$BUNDLE_SPRITES" = "1" ]; then
+    echo "# --- Pokemon HOME sprites (Step 2b) ---"
+    ev SPRITES_ICONS_DIR    "$SPRITES_ICONS_DIR"
+    ev SPRITES_PREVIEWS_DIR "$SPRITES_PREVIEWS_DIR"
+    [ "$BUNDLE_ANIMATED" = "1" ] && ev HOME_ANIMATED_DIR "$SPRITES_ANIMATED_DIR" || true
+    ev HOME_SPRITES_URL     "http://$HOST_IP:$API_PORT/sprites"
+    echo
+  fi
   echo "# --- chat model ---"
   ev OPENAI_BASE_URL "$OPENAI_BASE_URL"
   ev OPENAI_MODEL    "$OPENAI_MODEL"
@@ -761,6 +834,7 @@ ev() { printf '%s="%s"\n' "$1" "$2"; }
   ev NET_PROFILE          "$NET_PROFILE"
   ev OFFLINE              "$OFFLINE"
   ev STATS_DIR            "/stats"
+  ev PIKALYTICS_DIR       "/pikalytics"
   ev HF_HOME              "/data/models"
   ev HF_HUB_OFFLINE       "1"
   ev TRANSFORMERS_OFFLINE "1"
@@ -834,12 +908,46 @@ cat <<'YAML'
       - ${INSTALL_ROOT}/api:/app
       - ${INSTALL_ROOT}/data:/data
       - ${INSTALL_ROOT}/stats:/stats:ro
+      - ${INSTALL_ROOT}/pikalytics:/pikalytics:ro
       - ${ZIM_HOST_DIR}:/zim:ro
+YAML
+
+if [ "$BUNDLE_SPRITES" = "1" ]; then
+cat <<'YAML'
+      - ${SPRITES_ICONS_DIR}:/sprites/icons:ro
+      - ${SPRITES_PREVIEWS_DIR}:/sprites/previews:ro
+YAML
+fi
+
+if [ "$BUNDLE_ANIMATED" = "1" ]; then
+cat <<'YAML'
+      - ${SPRITES_ANIMATED_DIR}:/sprites/animated:ro
+YAML
+fi
+
+cat <<'YAML'
     environment:
       DB_PATH: /data/pokedex.db
       ZIM_PATH: /zim/${ZIM_FILENAME}
       KIWIX_URL: ${KIWIX_URL}
       KIWIX_BOOK: ${ZIM_BOOK}
+YAML
+
+if [ "$BUNDLE_SPRITES" = "1" ]; then
+cat <<'YAML'
+      HOME_ICONS_DIR: /sprites/icons
+      HOME_PREVIEWS_DIR: /sprites/previews
+      HOME_SPRITES_URL: ${HOME_SPRITES_URL}
+YAML
+fi
+
+if [ "$BUNDLE_ANIMATED" = "1" ]; then
+cat <<'YAML'
+      HOME_ANIMATED_DIR: /sprites/animated
+YAML
+fi
+
+cat <<'YAML'
       OPENAI_BASE_URL: ${OPENAI_BASE_URL}
       OPENAI_MODEL: ${OPENAI_MODEL}
       OPENAI_API_KEY: ${OPENAI_API_KEY}
@@ -856,6 +964,7 @@ cat <<'YAML'
       EMBED_QUERY_PREFIX: ${EMBED_QUERY_PREFIX}
       OFFLINE: "${OFFLINE}"
       STATS_DIR: ${STATS_DIR}
+      PIKALYTICS_DIR: ${PIKALYTICS_DIR}
       HF_HOME: ${HF_HOME}
       HF_HUB_OFFLINE: "${HF_HUB_OFFLINE}"
       TRANSFORMERS_OFFLINE: "${TRANSFORMERS_OFFLINE}"
@@ -1399,7 +1508,7 @@ fi
 
 echo
 if confirm "Create the directory structure under $INSTALL_ROOT now?"; then
-  mkdir -p "$INSTALL_ROOT"/{api,sim,data,ui,stats,sets,openwebui}
+  mkdir -p "$INSTALL_ROOT"/{api,sim,data,ui,stats,sets,pikalytics,openwebui}
   [ "$BUNDLE_KIWIX" = "1" ] && mkdir -p "$INSTALL_ROOT/zim" || true
   ok "Directories created."
 fi
@@ -2160,7 +2269,7 @@ ok "$STEPS_TXT"
 
 echo
 if confirm "Create the directory structure under $INSTALL_ROOT now?"; then
-  mkdir -p "$INSTALL_ROOT"/{api,sim,data,ui,stats,sets,openwebui}
+  mkdir -p "$INSTALL_ROOT"/{api,sim,data,ui,stats,sets,pikalytics,openwebui}
   [ "$BUNDLE_KIWIX" = "1" ] && mkdir -p "$INSTALL_ROOT/zim" || true
   ok "Directories created."
 fi
@@ -2190,6 +2299,21 @@ The short version:
      That is an offline archive of the whole wiki, roughly 3-8 GB.
      Get it from https://library.kiwix.org (search "Bulbapedia").
      Different filename? Re-run ./deploy.sh with the real one.
+EOS
+
+if [ "$BUNDLE_SPRITES" = "1" ]; then
+cat <<EOS
+
+  2b. Put your Pokemon HOME sprite archive here (optional, skippable):
+        $SPRITES_ICONS_DIR/       (icon PNGs)
+        $SPRITES_PREVIEWS_DIR/    (preview PNGs)
+      See the README, "Step 2b", for the required filename convention.
+      Without these, species images fall back to Bulbapedia's own article
+      artwork instead — everything else still works.
+EOS
+fi
+
+cat <<EOS
 
   3. Competitive stats (optional, skippable):
 EOS
