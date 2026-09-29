@@ -69,10 +69,13 @@ KIWIX_URL = os.environ.get("KIWIX_URL", "").rstrip("/")
 KIWIX_BOOK = os.environ.get("KIWIX_BOOK", "")
 SIM_URL = os.environ.get("SIM_URL", "http://pokedex-sim:8991").rstrip("/")
 STATS_DIR = os.environ.get("STATS_DIR", "")
+# Pikalytics usage snapshots written by fetch-pikalytics.py (Pokemon Champions).
+PIKALYTICS_DIR = os.environ.get("PIKALYTICS_DIR", "")
 ANALYSES_DIR = os.environ.get("ANALYSES_DIR", "")
 SETS_DIR = os.environ.get("SETS_DIR", "")
 HOME_ICONS_DIR = os.environ.get("HOME_ICONS_DIR", "")
 HOME_PREVIEWS_DIR = os.environ.get("HOME_PREVIEWS_DIR", "")
+HOME_ANIMATED_DIR = os.environ.get("HOME_ANIMATED_DIR", "")
 # Public URL prefix these two folders are served from — see the compose file
 # for the actual static-file mount this points at.
 HOME_SPRITES_URL = os.environ.get("HOME_SPRITES_URL", "").rstrip("/")
@@ -560,6 +563,10 @@ CREATE TABLE IF NOT EXISTS home_sprites (
     preview_path  TEXT,      -- relative path under the previews mount;
                               -- nullable — the two folders are NOT in lockstep
                               -- (confirmed: 3035 icon files vs 3029 previews)
+    animated_path TEXT,      -- relative path under the animated mount;
+                              -- nullable — a separate, later-added source with
+                              -- its own coverage (no Gigantamax forms at all,
+                              -- confirmed directly)
     source_file   TEXT,      -- original filename, kept for debugging
     PRIMARY KEY (natdex, form_index, gender, is_gmax, is_shiny)
 );
@@ -621,6 +628,33 @@ CREATE TABLE IF NOT EXISTS usage_stats (
 );
 CREATE INDEX IF NOT EXISTS idx_usage_lookup ON usage_stats(format, month, usage DESC);
 CREATE INDEX IF NOT EXISTS idx_usage_species ON usage_stats(species_id, format);
+
+CREATE TABLE IF NOT EXISTS species_locations (
+    species_id TEXT, gen INTEGER, game TEXT, location TEXT, seq INTEGER,
+    PRIMARY KEY (species_id, gen, game, seq)
+);
+CREATE INDEX IF NOT EXISTS idx_locations_species ON species_locations(species_id, gen);
+
+-- Fields a source publishes that usage_stats has no column for (win rate, how often a
+-- Pokemon is actually brought, Mega share...), plus WHO the numbers came from so the
+-- API can credit them. A companion table rather than new usage_stats columns: adding
+-- columns to a table with a positional INSERT has silently corrupted this database
+-- before. Only rows from sources that publish these fields (Pikalytics) have an entry.
+CREATE TABLE IF NOT EXISTS usage_extra (
+    format TEXT, month TEXT, cutoff INTEGER, species_id TEXT,
+    source TEXT, win_rate REAL, wins INTEGER, losses INTEGER,
+    brought_pct REAL, mega_pct REAL, leads TEXT, megas TEXT, data_date TEXT,
+    natures TEXT, pika_rank INTEGER,
+    PRIMARY KEY (format, month, cutoff, species_id)
+);
+
+-- Forms that differ from their base species only in APPEARANCE. They resolve to the base's
+-- data at lookup time (with a note saying so) instead of being copied into species, which
+-- would flood the dex with near-duplicate rows. natdex is the base species' number.
+CREATE TABLE IF NOT EXISTS visual_forms (
+    form_id TEXT PRIMARY KEY, form_name TEXT, base_id TEXT, natdex INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_visual_forms_natdex ON visual_forms(natdex);
 """
 
 
@@ -651,6 +685,10 @@ def _migrate(db: sqlite3.Connection) -> None:
     item_cols = {r["name"] for r in db.execute("PRAGMA table_info(items)")}
     if "is_choice" not in item_cols:
         db.execute("ALTER TABLE items ADD COLUMN is_choice INTEGER")
+
+    sprite_cols = {r["name"] for r in db.execute("PRAGMA table_info(home_sprites)")}
+    if "animated_path" not in sprite_cols:
+        db.execute("ALTER TABLE home_sprites ADD COLUMN animated_path TEXT")
 
     db.commit()
 
@@ -1145,6 +1183,78 @@ def _parse_home_filename(filename: str) -> dict | None:
     }
 
 
+_ANIMATED_FILENAME_RE = re.compile(
+    r"^(?P<natdex>\d{4})_(?P<species>[a-z0-9-]+)_(?P<form>[a-z0-9-]+)_(?P<variant>normal|shiny)\.gif$"
+)
+
+
+def _parse_animated_filename(filename: str) -> dict | None:
+    """
+    Parse one animated sprite filename against the canonical convention this
+    project's sprite-normalization tooling produces:
+    {dex:04d}_{species}_{form}_{variant}.gif — e.g.
+    0006_charizard_mega-x_shiny.gif. A different, unrecognized naming
+    convention returns None rather than a guess.
+    """
+    m = _ANIMATED_FILENAME_RE.match(filename)
+    if not m:
+        return None
+    return {
+        "natdex": int(m["natdex"]),
+        "species_slug": m["species"],
+        "form_slug": m["form"],
+        "is_shiny": m["variant"] == "shiny",
+    }
+
+
+def _match_animated_form(form_slug: str, formes: list[str]) -> int | None:
+    """
+    Match an animated sprite's form slug (this project's own convention:
+    'mega-x', 'alola', 'fan-rotom', hyphen-separated words) against a
+    species' known forme list from _build_forme_order_map (Showdown's own
+    convention: 'Charizard-Mega-X', 'Rattata-Alola', 'Rotom-Fan'), returning
+    the 1-based form_index — or None if nothing matches, rather than
+    guessing.
+
+    Compares TOKEN SETS, not a plain suffix string, because the two
+    conventions don't always agree on word order — confirmed directly
+    against the real archive: 'fan-rotom' names the same form as Showdown's
+    'Rotom-Fan', just with the words reversed. A slug matches when every one
+    of its tokens is a subset of the forme's own tokens (species name tokens
+    included — harmless, since the slug never contains the species name
+    itself, so this never over-matches on that account).
+
+    This also correctly REJECTS things that only superficially resemble a
+    match: 'mega-z' against Absol's real forme 'Absol-Mega' does NOT match,
+    because 'mega-z' has an extra token ('z') the real forme doesn't have —
+    confirmed this is the right call, not over-strictness, since 'mega-z'
+    turns out to name a different concept entirely (Legends Z-A's "Rogue
+    Mega Evolution," not the standard Mega), and treating it as the same
+    thing would have been a wrong, silent mislabel.
+
+    Tested directly against every distinct case the real archive actually
+    contains: single-Mega species ('mega' -> Venusaur-Mega), dual-Mega
+    species ('mega-x'/'mega-y' -> Charizard-Mega-X/-Y specifically), a
+    regional form ('alola' -> Rattata-Alola), and the word-order case above.
+    """
+    needle = set(t for t in form_slug.split("-") if t)
+    if not needle:
+        return None
+    # The TIGHTEST match wins (fewest tokens; ties keep list order), not simply the first.
+    # A subset test alone is ambiguous once a species has several formes that all contain the
+    # slug's tokens: with Tatsugiri-Mega, Tatsugiri-Droopy-Mega and Tatsugiri-Stretchy-Mega
+    # all present, the slug "mega" fits every one, and "first" would file the plain Mega's
+    # animation under whichever name happened to be listed first.
+    best_i = best_n = None
+    for i, forme in enumerate(formes):
+        if not forme:               # a number HOME skips (see HOME_FORME_ORDER_OVERRIDES)
+            continue
+        forme_tokens = set(t.lower() for t in forme.split("-") if t)
+        if needle <= forme_tokens and (best_n is None or len(forme_tokens) < best_n):
+            best_i, best_n = i, len(forme_tokens)
+    return best_i + 1 if best_i is not None else None
+
+
 def _build_forme_order_map(sim_url: str) -> dict[int, list[str]]:
     """
     Per National Dex number, the ordered list of alternate formes — merged
@@ -1483,22 +1593,1098 @@ def stage_item_categories(db: sqlite3.Connection) -> None:
     log(f"  item_categories: {len(rows)} rows total")
 
 
+# Confirmed, human-verified (natdex, form_index) -> forme_name pairs for
+# cases the general merge logic below genuinely can't resolve safely on its
+# own — specifically, two or more UNRELATED formes (not a real X/Y/Z sibling
+# family) competing for multiple unlabeled static candidates at the same
+# natdex. No principled sort order distinguishes them in general (confirmed
+# directly: alphabetical sort paired Zygarde's two forms backwards), so
+# these are recorded here exactly as verified against the real images,
+# rather than guessed at by a heuristic. Add to this as more get confirmed.
+CONFIRMED_FORM_INDEX_OVERRIDES: dict[tuple[int, int], str] = {
+    (718, 4): "Zygarde-Complete",
+    (718, 5): "Zygarde Complete Forme-Mega",
+    # Greninja: HOME has ONE legacy alternate form (the Ash/Battle Bond one, index 2),
+    # but Showdown lists two (Greninja-Bond, Greninja-Ash), so the positional labelling
+    # rule called index 1 "Greninja-Bond" and index 2 "Greninja-Ash". Index 1 is in fact
+    # the Legends Z-A Mega — confirmed against the images (it also has the signature of
+    # every other Z-A Mega here: a preview but no icon).
+    (658, 1): "Greninja-Mega",
+    # Magearna: 002 is the Mega, 003 the Original Color form's Mega — both confirmed against
+    # the images. 003 has no species row of its own (Bulbapedia lists one Magearna Mega), so
+    # it is labelled in place, purely so its picture is reachable as an alternate form.
+    (801, 2): "Magearna-Mega",
+    (801, 3): "Magearna-Original-Mega",
+    # Floette: confirmed 005 is the Mega. (The sprite-naming plan expected 006; it was never
+    # renamed, so the Mega took the slot the Eternal Flower form was expected to have.)
+    (670, 5): "Eternal Flower Floette-Mega",
+    # ...and 006 is the Eternal Flower form itself, confirmed. Nothing in the species table or
+    # the simulator's forme order names it, so it is labelled in place, giving the sprite a
+    # name the UI can show.
+    (670, 6): "Floette-Eternal",
+    # Tatsugiri: 003 / 004 / 005 are the Curly / Droopy / Stretchy Megas, confirmed. Each has
+    # its own animation (mega-curly / -droopy / -stretchy), so each merges into its own row.
+    (978, 3): "Tatsugiri-Mega",
+    (978, 4): "Tatsugiri-Droopy-Mega",
+    (978, 5): "Tatsugiri-Stretchy-Mega",
+    # Minior's core colours: 007 Red, then rainbow order. Confirmed. (000, the Meteor Form, is the default.)
+    (774, 7): "Minior-Red", (774, 8): "Minior-Orange", (774, 9): "Minior-Yellow", (774, 10): "Minior-Green",
+    (774, 11): "Minior-Blue", (774, 12): "Minior-Indigo", (774, 13): "Minior-Violet",
+}
+
+# HOME's own form order, where it differs from the simulator's. Position N is HOME form_index
+# N+1; None marks a number HOME skips. This REPLACES the simulator's list for that species, so
+# the still labels and the animation matching (which read the same list) both follow HOME.
+#   Pikachu: the simulator lists the Cosplay forms first, so the positional rule labelled HOME's
+#   001-006 as Cosplay/Rock-Star/Belle/Pop-Star/PhD/Libre. Those are really the caps —
+#   001 Original, 002 Hoenn, 003 Sinnoh, 004 Unova, 005 Kalos, 006 Alola, 007 Partner, and 009
+#   World, with no 008 — confirmed against the images (001, 002, 006, 007 and 009 by name; the
+#   ones between in the caps' usual order). HOME has no Cosplay Pikachu sprites at all.
+HOME_FORME_ORDER_OVERRIDES: dict[int, list] = {
+    25: ["Pikachu-Original", "Pikachu-Hoenn", "Pikachu-Sinnoh", "Pikachu-Unova", "Pikachu-Kalos",
+         "Pikachu-Alola", "Pikachu-Partner", None, "Pikachu-World"],
+}
+
+# Species whose HOME form 0 is NOT the look the dex should default to. {dex: {old form_index: new}} —
+# rows are renumbered right after the static scan, before anything is labeled or matched.
+# Currently empty. Minior was here briefly (swapping the Meteor Form and the Red Core so the Core
+# was the default), but the Meteor Form IS HOME's form 0 and the in-game default, so it stays
+# there — see BASE_FORM_ALSO_NAMED.
+HOME_FORM_REMAP: dict[int, dict[int, int]] = {}
+
+# Forms with no shiny still of their own that share another form's. {dex: (source form, [forms])}.
+#   Minior: every Core colour shares ONE shiny look, HOME's "Shiny Core" — the shiny of 007, the
+#   Red Core. (The Meteor Form has no shiny still at all.)
+SHARED_SHINY_STILL: dict[int, tuple[str, list[str]]] = {
+    774: ("Minior-Red", ["Minior-Orange", "Minior-Yellow", "Minior-Green", "Minior-Blue",
+                         "Minior-Indigo", "Minior-Violet"]),
+}
+
+# Species whose form 0 (the default) is ALSO a named form the simulator treats separately: the
+# form-0 rows are copied under that name so the named species resolves to the same picture.
+#   Minior-Meteor: HOME's form 0 is the Meteor Form; the simulator calls the Core "Minior" and
+#   the Meteor "Minior-Meteor". Both are right — one picture serves the dex default and the name.
+BASE_FORM_ALSO_NAMED: dict[int, list[str]] = {774: ["Minior-Meteor"]}
+BASE_ALIAS_FORM_INDEX_BASE = 250
+
+# Animated slugs that name a form the species table has under a plainer name. Tatsugiri's
+# three Megas ship as mega-curly / mega-droopy / mega-stretchy, but Curly is the species'
+# default form and so is simply "Tatsugiri-Mega" — no "Curly" in the name to match.
+ANIMATED_SLUG_SYNONYMS: dict[tuple[int, str], str] = {
+    (978, "mega-curly"): "mega",
+    # Pikachu's caps ship as "<cap>-cap"; the forme is simply "Pikachu-<Cap>", so the extra
+    # token would stop the match. Once matched, HOME_FORME_ORDER_OVERRIDES puts each on the
+    # same form number as its still.
+    (25, "original-cap"): "original", (25, "hoenn-cap"): "hoenn", (25, "sinnoh-cap"): "sinnoh",
+    (25, "unova-cap"): "unova", (25, "kalos-cap"): "kalos", (25, "alola-cap"): "alola",
+    (25, "partner-cap"): "partner",
+}
+
+# One Mega with several forms that share its stats. Bulbapedia (and every other source
+# checked) lists a single Mega Tatsugiri, 68/65/90/135/125/92, for all three of its forms —
+# but the forms look different and each has its own sprite, so each gets its own named row,
+# copied from the parsed Mega. {name of the parsed Mega: [additional names]}.
+ZA_MEGA_FORM_VARIANTS: dict[str, list[str]] = {
+    "Tatsugiri-Mega": ["Tatsugiri-Droopy-Mega", "Tatsugiri-Stretchy-Mega"],
+}
+
+# Showdown names that HOME treats as ONE form. Keyed (natdex, the name that owns the
+# sprite row) -> the other names, which get a copy of that row so each name resolves to
+# the real sprite instead of to nothing. Confirmed against the images, not inferred.
+CONFIRMED_SAME_FORM: dict[tuple[int, str], list[str]] = {
+    (658, "Greninja-Ash"): ["Greninja-Bond"],
+}
+# Copies live at their own form_index so they can never collide with a real HOME form or
+# with the 101+ range the Z-A Megas use.
+SHARED_FORM_INDEX_BASE = 200
+
+_MEGA_STATS_BLOCK_RE = re.compile(
+    r"HP\s*:\s*(\d+).*?"
+    r"Attack\s*:\s*(\d+).*?"
+    r"Defense\s*:\s*(\d+).*?"
+    r"Sp\.\s*Atk\s*:\s*(\d+).*?"
+    r"Sp\.\s*Def\s*:\s*(\d+).*?"
+    r"Speed\s*:\s*(\d+)",
+    re.S,
+)
+
+
+def _parse_mega_evolution_table(text: str) -> tuple[list[dict], int]:
+    """
+    Parse one "Introduced with..." Mega Evolution table from Bulbapedia's
+    "Mega Evolution" article into (rows, skipped_continuation_count).
+
+    Table shape, confirmed directly against the real article text for both
+    the base "Introduced with Pokémon Legends: Z-A" table (26 rows) and its
+    nested "Introduced with Mega Dimension" DLC sub-table (18 dex-numbered
+    rows, matching that sub-table's own stated "18 Pokémon" count exactly):
+    a 10-cell row per species — dex, name, [blank image], before-type,
+    before-ability, [blank image], after-type, after-ability, Mega Stone
+    name, availability tokens (ZA / Champs / MD in some combination).
+
+    A row with no dex number is a continuation of the row above — but two
+    genuinely different things produce that shape, confirmed directly by
+    comparing their actual cells rather than assuming:
+    - Raichu's second row (Mega Y) has cells[0] literally EMPTY (''): a
+      real second Mega for the same species, with its own type/ability/
+      stone/availability shifted into cells[1:5]. Built here as a genuine
+      second mega dict, marked is_continuation=True, inheriting natdex/name
+      from the row directly above it — NOT skipped anymore.
+    - Meowstic's second row has cells[0] NON-empty but not a dex number
+      (the literal text "Meowstic Female") — a gender-specific ABILITY
+      note, not a second Mega at all (male and female Meowstic share one
+      Mega, one stone, one stat line). Still skipped; building a mega out
+      of this would invent a species that doesn't exist.
+
+    "Unknown" as an ability means Bulbapedia itself doesn't have confirmed
+    data yet (several Mega Dimension Megas, confirmed directly) — stored
+    as None, never as the literal string "Unknown", which is not a real
+    ability name and would be actively misleading if surfaced as one.
+    """
+    rows: list[dict] = []
+    skipped = 0
+    prev_natdex: int | None = None
+    prev_name: str | None = None
+    for line in text.split("\n"):
+        line = line.strip()
+        if not line.startswith("|") or set(line) <= set("|- "):
+            continue
+        cells = [c.strip() for c in line.split("|")]
+        cells = cells[1:-1]
+        if len(cells) != 10:
+            continue
+        if cells[0] in ("Dex", "Image"):
+            continue
+
+        if cells[0] == "":
+            # Raichu-style: a genuine second Mega, shifted left by the
+            # missing dex/name/before-type/before-ability/blank-image cells.
+            if prev_natdex is None:
+                skipped += 1
+                continue
+            after_ability = cells[2]
+            rows.append({
+                "natdex": prev_natdex,
+                "name": prev_name,
+                "after_type": cells[1].split(),
+                "after_ability": None if after_ability == "Unknown" else after_ability,
+                "mega_stone": cells[3],
+                "availability": cells[4].split(),
+                "is_continuation": True,
+            })
+            continue
+
+        dex = cells[0].lstrip("#").strip()
+        if not dex.isdigit():
+            # Meowstic-style: a name, not a dex number — a gender-ability
+            # note, not a second species. Genuinely skipped.
+            skipped += 1
+            continue
+
+        after_ability = cells[7]
+        prev_natdex, prev_name = int(dex), cells[1]
+        rows.append({
+            "natdex": prev_natdex,
+            "name": prev_name,
+            "after_type": cells[6].split(),
+            "after_ability": None if after_ability == "Unknown" else after_ability,
+            "mega_stone": cells[8],
+            "availability": cells[9].split(),
+            "is_continuation": False,
+        })
+    return rows, skipped
+
+
+
+def _parse_mega_base_stats(full_text: str, from_end: int = 1) -> dict | None:
+    """
+    The true Mega Evolution base stats from a species' concatenated "Base
+    stats" wiki_chunks text, or None if no confirmed Mega-specific stat
+    block exists yet.
+
+    A species page can have 2 or more stat blocks back to back depending on
+    whether Legends Z-A's ability-less mechanic forced a stat compensation
+    for that specific Mega (confirmed directly, checking four real species:
+    Clefable/Starmie have 3 blocks — base, a Z-A-only stat-compensated
+    variant, then the standard Mega; Skarmory/Dragonite have exactly 2 —
+    base then Mega), or, for a dual-Mega species, one additional block per
+    extra Mega — confirmed directly: Raichu has 5 (base, a Z-A-compensated
+    variant, Alolan Raichu, Mega X, Mega Y).
+
+    from_end=1 (default) is the LAST block — correct for every single-Mega
+    species. from_end=2 is the SECOND-TO-LAST — used for a dual-Mega
+    species' FIRST (X) Mega, since the pair always appears in that order
+    (X's block immediately before Y's, both after everything else) —
+    confirmed directly against Raichu's real page and cross-checked against
+    five independent sources for both Mega X's and Mega Y's real stats.
+
+    Requires AT LEAST 2 blocks, not just "at least 1" — confirmed directly
+    that a single block means the Mega is confirmed to exist (it's in the
+    master list) but Bulbapedia hasn't published its own distinct stats yet:
+    Meowstic (Pokémon) has exactly one block, and it's Meowstic's own
+    regular 466 BST, not Mega Meowstic's. Treating that lone block as "the
+    Mega's stats" would confidently mislabel the base species' own numbers
+    as if they were verified Mega data — a single missing block is exactly
+    as unusable as zero, not a fallback case.
+    """
+    blocks = _MEGA_STATS_BLOCK_RE.findall(full_text)
+    if len(blocks) < max(2, from_end):
+        return None
+    hp, atk, de, spa, spd, spe = (int(x) for x in blocks[-from_end])
+    return {"hp": hp, "atk": atk, "def": de, "spa": spa, "spd": spd, "spe": spe,
+            "bst": hp + atk + de + spa + spd + spe}
+
+
+_MEGA_PAGE_TITLE_STRIP = [
+    (re.compile(r"^Eternal Flower "), ""),
+    (re.compile(r" (Male|Female)$"), ""),
+    (re.compile(r" Complete Forme$"), ""),
+]
+
+
+def _mega_page_title(base_name: str) -> str:
+    """
+    The master list's "Pokémon" column sometimes includes a form/gender
+    qualifier that ISN'T part of the actual Bulbapedia page title — confirmed
+    directly for all three real cases this table produces: "Meowstic Male"
+    (the page is just "Meowstic (Pokémon)" — male/female Meowstic share one
+    page and one Mega stat block), "Zygarde Complete Forme" (the page is
+    "Zygarde (Pokémon)", one article covering all of its forms), "Eternal
+    Flower Floette" (the page is "Floette (Pokémon)"). Only used for the
+    PAGE LOOKUP — the qualified name is kept as-is in base_species, since
+    it's genuinely informative there (Zygarde's forms have different stats
+    from each other, so "which Zygarde" matters for that field even though
+    it doesn't matter for which Bulbapedia article to open).
+    """
+    name = base_name
+    for pattern, repl in _MEGA_PAGE_TITLE_STRIP:
+        name = pattern.sub(repl, name)
+    return name.strip()
+
+
+def stage_za_champions_megas(db: sqlite3.Connection) -> None:
+    """
+    New Mega Evolutions introduced in Pokemon Legends: Z-A (and its Mega
+    Dimension DLC, shared with Pokemon Champions) — parsed directly from
+    Bulbapedia, since neither @pkmn/dex nor Smogon has any data for them at
+    all yet. Confirmed directly: @pkmn/sim's own documentation states "only
+    Gens 1-9 are supported, no other mods," and this system's live wiki
+    snapshot already has the two source tables needed (both already in
+    wiki_chunks from stage_wiki — no new external fetch required).
+
+    Requires stage_wiki to have already run.
+
+    IMPORTANT, real limitation, not a bug: these rows go into THIS system's
+    own species table only. pokedex-sim's real @pkmn/sim battle engine has
+    no knowledge of them at all, since nothing here touches its own data —
+    lookup/query_dex work fine, but calc_damage/validate_team/review_team/
+    compare_teams (all proxied to that engine) will fail on any of these,
+    since the simulator's own dex has no such species. gen is tagged to
+    match the BASE SPECIES' OWN most recent generation, not hardcoded — a
+    real problem otherwise, confirmed directly: Zygarde has no Gen 9 data at
+    all (removed from the dex after Gen 8), so a Mega hardcoded to gen=9
+    would be permanently unreachable alongside its own base forms, since
+    /lookup's gen filter is an exact match, not "this gen or earlier." Falls
+    back to 9 only if the base species row itself can't be found at all.
+    tier is repurposed to carry the
+    source's own availability tokens (ZA / Champs / MD) rather than a real
+    competitive tier, since neither game has Smogon-style tiering and this
+    avoids a schema change for a small, source-specific detail.
+    """
+    stage("Stage — Legends Z-A / Champions Mega Evolutions (from Bulbapedia)")
+
+    section_rows = db.execute(
+        "SELECT text FROM wiki_chunks WHERE article_title = 'Mega Evolution' "
+        "AND (section_path = 'Mega Evolution → Pokémon capable of Mega Evolution "
+        "→ Introduced with Pokémon Legends: Z-A' "
+        "OR section_path LIKE '%Introduced with Mega Dimension') "
+        "ORDER BY id"
+    ).fetchall()
+    if not section_rows:
+        log("  no Legends Z-A Mega Evolution table found in wiki_chunks — is stage_wiki populated?")
+        return
+
+    all_rows: list[dict] = []
+    total_skipped = 0
+    for r in section_rows:
+        parsed, skipped = _parse_mega_evolution_table(r["text"])
+        all_rows.extend(parsed)
+        total_skipped += skipped
+    log(f"  {len(all_rows)} Mega Evolutions found across both tables "
+        f"({total_skipped} multi-row continuations skipped — see docstring)")
+
+    db.execute("DELETE FROM species WHERE forme LIKE 'Mega%ZA'")
+
+    inserted = no_stats = no_base_row = variants_added = 0
+    for i, mega in enumerate(all_rows):
+        base_name = mega["name"]
+        page_title = _mega_page_title(base_name)
+        stats_rows = db.execute(
+            "SELECT text FROM wiki_chunks WHERE article_title = ? "
+            "AND section_path LIKE '%Game data → Stats → Base stats' ORDER BY id",
+            (f"{page_title} (Pokémon)",),
+        ).fetchall()
+        if not stats_rows:
+            log(f"  ! no Bulbapedia species page/stats found for {base_name!r} "
+                f"(looked for {page_title!r}) — skipping")
+            no_stats += 1
+            continue
+        # A row immediately followed by its own Y-continuation needs the
+        # SECOND-TO-LAST stat block, not the last — confirmed directly
+        # against Raichu's real page (5 blocks) and cross-checked against
+        # five independent sources: the last block is Mega Y's real stats,
+        # the one before it is Mega X's. Without this, X and Y would both
+        # silently get Y's stats, since "take the last block" was written
+        # assuming exactly one Mega per species.
+        next_is_continuation = (
+            i + 1 < len(all_rows)
+            and all_rows[i + 1]["is_continuation"]
+            and all_rows[i + 1]["natdex"] == mega["natdex"]
+        )
+        from_end = 2 if next_is_continuation else 1
+        stats = _parse_mega_base_stats(
+            "\n".join(r["text"] for r in stats_rows), from_end=from_end)
+        if not stats:
+            block_count = len(_MEGA_STATS_BLOCK_RE.findall("\n".join(r["text"] for r in stats_rows)))
+            if block_count == 1:
+                log(f"  ! {page_title}'s page only has its own regular stat block — "
+                    f"Bulbapedia hasn't published this Mega's own stats yet — skipping")
+            else:
+                log(f"  ! {page_title}'s page has no parseable stat block at all — skipping")
+            no_stats += 1
+            continue
+
+        # Several fields aren't sourced from either Bulbapedia table at all
+        # (egg groups, weight, height) — genuinely unchanged by Mega
+        # Evolution, so mirrored from the base species' own row rather than
+        # left NULL. /lookup's species branch calls json.loads() on
+        # egg_groups/evos unconditionally — a NULL there isn't just an
+        # incomplete row, it's a guaranteed crash the moment anyone looks up
+        # one of these Megas, confirmed directly. prevo/evos are NOT
+        # mirrored, though, on purpose: a Mega isn't part of the normal
+        # evolution chain — Clefable-Mega doesn't have its own separate
+        # "evolves from/into," it's a temporary battle transformation — so
+        # these are explicitly emptied rather than copied from base.
+        base_row = db.execute(
+            "SELECT gen, egg_groups, weight_kg, height_m, doubles_tier FROM species "
+            "WHERE id=? ORDER BY gen DESC LIMIT 1", (norm(page_title),)
+        ).fetchone()
+        if not base_row:
+            log(f"  ! {page_title}'s own species row not found — using empty "
+                f"defaults for egg groups/weight/height rather than skipping entirely")
+            no_base_row += 1
+        egg_groups = base_row["egg_groups"] if base_row else "[]"
+        weight_kg = base_row["weight_kg"] if base_row else None
+        height_m = base_row["height_m"] if base_row else None
+        doubles_tier = base_row["doubles_tier"] if base_row else None
+        # Tagged with the BASE SPECIES' own most recent gen, not a hardcoded
+        # 9 — confirmed a real problem otherwise: Zygarde has no Gen 9 data
+        # at all (removed from the dex after Gen 8), so a Mega hardcoded to
+        # gen=9 would be permanently unreachable alongside its own base
+        # forms — no single gen value could ever find both, since /lookup's
+        # gen filter is exact-match, not "this gen or earlier." Falls back
+        # to 9 only when the base species row itself couldn't be found at
+        # all (the no_base_row case just above).
+        mega_gen = base_row["gen"] if base_row else 9
+
+        # A dual-Mega species (only Raichu, currently) needs a disambiguating
+        # forme suffix; everything else is just "Mega". mega_stone's own
+        # name reveals which: a stone ending "X"/"Y" is dual-Mega style, a
+        # stone ending "Z" is Mega Dimension's separate second-Mega-family.
+        suffix = "Mega"
+        stone_upper = mega["mega_stone"].upper()
+        if stone_upper.endswith(" X") or stone_upper.endswith("ITE X"):
+            suffix = "Mega-X"
+        elif stone_upper.endswith(" Y") or stone_upper.endswith("ITE Y"):
+            suffix = "Mega-Y"
+        elif stone_upper.endswith(" Z") or stone_upper.endswith("ITE Z"):
+            suffix = "Mega-Z"
+
+        full_name = f"{base_name}-{suffix}"
+        sid = norm(full_name)
+        db.execute(
+            """INSERT OR REPLACE INTO species
+               (id, gen, name, num, types, hp, atk, def_, spa, spd, spe, bst,
+                abilities, base_species, forme, battle_only, required_item,
+                tier, nfe, egg_groups, weight_kg, height_m, doubles_tier,
+                prevo, evos)
+               VALUES (:id, :gen, :name, :num, :types, :hp, :atk, :def_, :spa,
+                       :spd, :spe, :bst, :abilities, :base_species, :forme,
+                       1, :required_item, :tier, 0, :egg_groups, :weight_kg,
+                       :height_m, :doubles_tier, NULL, '[]')""",
+            {
+                "id": sid, "gen": mega_gen, "name": full_name, "num": mega["natdex"],
+                "types": json.dumps(mega["after_type"]),
+                "hp": stats["hp"], "atk": stats["atk"], "def_": stats["def"],
+                "spa": stats["spa"], "spd": stats["spd"], "spe": stats["spe"],
+                "bst": stats["bst"],
+                "abilities": json.dumps([mega["after_ability"]] if mega["after_ability"] else []),
+                "base_species": base_name,
+                # Tagged so this batch can be cleanly re-deleted/re-run without
+                # touching any real Gen 6/7 Mega, whose forme is plain "Mega"/
+                # "Mega-X"/"Mega-Y" with no suffix.
+                "forme": f"{suffix}-ZA",
+                "required_item": mega["mega_stone"],
+                "tier": " ".join(mega["availability"]),
+                "egg_groups": egg_groups, "weight_kg": weight_kg,
+                "height_m": height_m, "doubles_tier": doubles_tier,
+            },
+        )
+        # A self-alias, generated directly here rather than left to
+        # stage_aliases — confirmed a real, not hypothetical, problem
+        # otherwise: stage_aliases only sees whatever species rows already
+        # existed the last time IT ran, and --za-megas-only run on its own
+        # never triggers it. Any Mega inserted, or fixed by a later run of
+        # this same stage, after the last stage_aliases pass had no alias
+        # at all and was completely unfindable by name — not "resolves to
+        # the wrong thing," genuinely absent from the lookup table entirely.
+        db.execute(
+            "INSERT OR REPLACE INTO aliases (alias_norm, alias, canonical_id, kind, source) "
+            "VALUES (?, ?, ?, 'species', 'za_champions_megas')",
+            (norm(full_name), full_name, sid),
+        )
+        inserted += 1
+
+        # Extra named forms of this Mega, copied from the row just written (see
+        # ZA_MEGA_FORM_VARIANTS). INSERT ... SELECT so every column comes across as-is.
+        for variant in ZA_MEGA_FORM_VARIANTS.get(full_name, []):
+            db.execute(
+                """INSERT OR REPLACE INTO species
+                   (id, gen, name, num, types, hp, atk, def_, spa, spd, spe, bst,
+                    abilities, base_species, forme, battle_only, required_item,
+                    tier, nfe, egg_groups, weight_kg, height_m, doubles_tier,
+                    prevo, evos)
+                   SELECT ?, gen, ?, num, types, hp, atk, def_, spa, spd, spe, bst,
+                    abilities, base_species, forme, battle_only, required_item,
+                    tier, nfe, egg_groups, weight_kg, height_m, doubles_tier,
+                    prevo, evos
+                   FROM species WHERE id=? AND gen=?""",
+                (norm(variant), variant, sid, mega_gen),
+            )
+            db.execute(
+                "INSERT OR REPLACE INTO aliases (alias_norm, alias, canonical_id, kind, source) "
+                "VALUES (?, ?, ?, 'species', 'za_champions_megas')",
+                (norm(variant), variant, norm(variant)),
+            )
+            variants_added += 1
+
+    db.commit()
+    log(f"  {inserted} Mega Evolutions inserted, {no_stats} skipped for missing stats"
+        f"{f', {variants_added} extra named forms copied from them' if variants_added else ''}"
+        f"{f', {no_base_row} used empty egg/weight/height defaults (base species row not found)' if no_base_row else ''}")
+    set_meta(db, "za_champions_megas_ingested_at",
+             time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+
+
+# ---------------------------------------------------------------------------
+# Stage — extra forms and visual-only forms
+# ---------------------------------------------------------------------------
+#
+# Two small, curated tables that fill gaps the simulator's data leaves, each entry checked
+# by hand rather than inferred — the same rule as CONFIRMED_FORM_INDEX_OVERRIDES.
+
+# Species the simulator's dex dump does not contain but that genuinely have their own data.
+# Rows are made for every generation the base species exists in.
+#   Floette-Eternal (AZ's Floette): 74/65/67/125/128/92 = 551, Fairy, Flower Veil, 0.2 m,
+#   0.9 kg — the same numbers on Smogon, Serebii, Marriland, Game8, PokePC, Pokemon DB and
+#   Pokemondex. Its Mega (651) already comes from Bulbapedia via the Z-A Mega stage.
+EXTRA_SPECIES: list[dict] = [
+    {"name": "Floette-Eternal", "base": "Floette", "forme": "Eternal",
+     "types": ["Fairy"], "stats": (74, 65, 67, 125, 128, 92),
+     "abilities": ["Flower Veil"], "height_m": 0.2, "weight_kg": 0.9, "tier": "Illegal"},
+]
+
+# Forms that are PURELY visual: same stats, typing, abilities, moves and evolution as the base
+# species, differing only in looks. {form name: base species name}. Curated on purpose —
+# identical stats are necessary but NOT sufficient (the Cosplay Pikachus have identical stats
+# but each has a unique move; Rockruff-Dusk is ability-related, not visual). The stage logs
+# the forms that ARE identical to their base so new entries can be reviewed and added here.
+VISUAL_ONLY_FORMES: dict[str, str] = {
+    # Pikachu's caps (and Pichu's ears): cosmetic in every game they appear in
+    "Pikachu-Original": "Pikachu", "Pikachu-Hoenn": "Pikachu", "Pikachu-Sinnoh": "Pikachu",
+    "Pikachu-Unova": "Pikachu", "Pikachu-Kalos": "Pikachu", "Pikachu-Alola": "Pikachu",
+    "Pikachu-Partner": "Pikachu", "Pikachu-World": "Pikachu",
+    "Pichu-Spiky-eared": "Pichu",
+    # Authenticity forms: only the appearance changes
+    "Sinistea-Antique": "Sinistea", "Polteageist-Antique": "Polteageist",
+    "Poltchageist-Artisan": "Poltchageist", "Sinistcha-Masterpiece": "Sinistcha",
+    # Minior's core colours. The Meteor form is NOT here: it has different stats, so it is a real form.
+    "Minior-Red": "Minior", "Minior-Orange": "Minior", "Minior-Yellow": "Minior", "Minior-Green": "Minior",
+    "Minior-Blue": "Minior", "Minior-Indigo": "Minior", "Minior-Violet": "Minior",
+}
+
+
+def stage_extra_forms(db: sqlite3.Connection) -> None:
+    stage("Stage — extra forms and visual-only forms")
+
+    # --- species the simulator's data lacks -------------------------------------------
+    added = 0
+    for spec in EXTRA_SPECIES:
+        base_rows = db.execute("SELECT * FROM species WHERE id=?", (norm(spec["base"]),)).fetchall()
+        if not base_rows:
+            log(f"  ! {spec['name']}: base species {spec['base']} not in the species table — skipped")
+            continue
+        sid = norm(spec["name"])
+        hp, atk, de, spa, spd, spe = spec["stats"]
+        for b in base_rows:
+            db.execute(
+                """INSERT OR REPLACE INTO species
+                   (id, gen, name, num, types, hp, atk, def_, spa, spd, spe, bst,
+                    abilities, base_species, forme, battle_only, required_item,
+                    tier, nfe, egg_groups, weight_kg, height_m, doubles_tier,
+                    prevo, evos)
+                   VALUES (:id, :gen, :name, :num, :types, :hp, :atk, :def_, :spa, :spd,
+                           :spe, :bst, :abilities, :base_species, :forme, 0, NULL, :tier,
+                           0, :egg_groups, :weight_kg, :height_m, NULL, NULL, '[]')""",
+                {"id": sid, "gen": b["gen"], "name": spec["name"], "num": b["num"],
+                 "types": json.dumps(spec["types"]), "hp": hp, "atk": atk, "def_": de,
+                 "spa": spa, "spd": spd, "spe": spe, "bst": hp + atk + de + spa + spd + spe,
+                 "abilities": json.dumps(spec["abilities"]), "base_species": spec["base"],
+                 "forme": spec["forme"], "tier": spec["tier"], "egg_groups": b["egg_groups"],
+                 "weight_kg": spec["weight_kg"], "height_m": spec["height_m"]},
+            )
+        db.execute(
+            "INSERT OR REPLACE INTO aliases (alias_norm, alias, canonical_id, kind, source) "
+            "VALUES (?, ?, ?, 'species', 'extra_forms')", (sid, spec["name"], sid))
+        added += 1
+    log(f"  {added} extra species added (own stats, every generation their base exists in)")
+
+    # --- visual-only forms --------------------------------------------------------------
+    db.execute("DELETE FROM visual_forms")
+    db.execute("DELETE FROM aliases WHERE source='visual_forms'")
+    registered, skipped = 0, []
+    for form_name, base_name in VISUAL_ONLY_FORMES.items():
+        base = db.execute("SELECT num FROM species WHERE id=? LIMIT 1", (norm(base_name),)).fetchone()
+        if not base:
+            skipped.append(form_name)
+            continue
+        fid = norm(form_name)
+        db.execute("INSERT OR REPLACE INTO visual_forms (form_id, form_name, base_id, natdex) "
+                   "VALUES (?, ?, ?, ?)", (fid, form_name, norm(base_name), base["num"]))
+        # Findable by name even when no species row exists for it
+        db.execute("INSERT OR REPLACE INTO aliases (alias_norm, alias, canonical_id, kind, source) "
+                   "VALUES (?, ?, ?, 'species', 'visual_forms')", (fid, form_name, fid))
+        registered += 1
+    log(f"  {registered} visual-only forms registered" +
+        (f"; skipped (base species missing): {skipped}" if skipped else ""))
+
+    # --- advisory: forms whose data is identical to their base's --------------------------
+    registered_ids = {norm(n) for n in VISUAL_ONLY_FORMES}
+    sig = lambda r: (r["types"], r["hp"], r["atk"], r["def_"], r["spa"], r["spd"], r["spe"], r["abilities"])
+    by_key = {(r["id"], r["gen"]): r for r in db.execute(
+        "SELECT id, gen, name, base_species, forme, types, hp, atk, def_, spa, spd, spe, abilities FROM species")}
+    latest: dict[str, sqlite3.Row] = {}
+    for (rid, g), r in by_key.items():
+        if r["forme"] and not r["forme"].startswith("Mega") and (rid not in latest or g > latest[rid]["gen"]):
+            latest[rid] = r
+    cands = sorted(r["name"] for rid, r in latest.items()
+                   if rid not in registered_ids and r["base_species"]
+                   and (norm(r["base_species"]), r["gen"]) in by_key
+                   and sig(by_key[(norm(r["base_species"]), r["gen"])]) == sig(r))
+    if cands:
+        log(f"  {len(cands)} other forms have stats, typing and abilities IDENTICAL to their base — "
+            f"candidates to review for VISUAL_ONLY_FORMES (identical data is necessary, not sufficient): "
+            f"{cands[:40]}")
+    db.commit()
+    set_meta(db, "extra_forms_ingested_at", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+
+
+# ---------------------------------------------------------------------------
+# Stage — Pikalytics usage statistics (Pokemon Champions)
+# ---------------------------------------------------------------------------
+#
+# Loads the JSON snapshots fetch-pikalytics.py wrote into PIKALYTICS_DIR
+# (<format>-<cutoff>-<YYYY-MM>.json) into the SAME usage_stats table the Smogon
+# data lives in, so the existing usage_stats tool works on these formats
+# unchanged. Reads local files only — like stage_stats, this script never goes
+# to the network itself.
+#
+# What is deliberately NOT carried over, each confirmed against the real data:
+#   spreads   Pikalytics publishes no EV/nature/Stat Point data for Champions
+#             ("natures" and "spreads" arrive empty; its own pages say so).
+#   counters  Its "counters" list carries games + winPercent but no stated
+#             definition of whose win rate that is, and the sample sizes are
+#             tiny (19 games for the top entry on Rillaboom). Presenting it as
+#             a 0-1 "check score" like Smogon's would risk the model telling
+#             someone the wrong Pokemon counters something.
+# Percentages are also NOT all the same kind of number: items and abilities are
+# shares that sum to ~100%, moves and teammates are not (Rillaboom's top ten
+# moves alone sum to 166%). The ingest log prints that check on real data.
+
+_PIKA_NAME_RE = re.compile(r"^(?P<fmt>[a-z0-9]+)-(?P<cut>\d+)-(?P<month>\d{4}-\d{2})\.json$")
+
+
+def _pika_num(v) -> float | None:
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _pika_int(*vals) -> int:
+    for v in vals:
+        n = _pika_num(v)
+        if n is not None:
+            return int(n)
+    return 0
+
+
+def _pika_ranked(items, name_key: str, n: int) -> list[dict]:
+    """
+    [{name, pct}], highest first, from Pikalytics' [{<name_key>, percent}] lists.
+
+    Some lists carry a rank but NO percentage (the battle-data format's teammates). Those
+    are kept in rank order with pct null, after any entries that do have one, rather than
+    dropped — a percentage is never invented for them.
+    """
+    with_pct, rank_only = [], []
+    for it in items or []:
+        if not isinstance(it, dict):
+            continue
+        name, p = it.get(name_key), _pika_num(it.get("percent"))
+        if not name:
+            continue
+        if p is not None:
+            with_pct.append({"name": name, "pct": round(p, 2)})
+        elif _pika_num(it.get("rank")) is not None:
+            rank_only.append((_pika_num(it.get("rank")), {"name": name, "pct": None}))
+    with_pct.sort(key=lambda x: x["pct"], reverse=True)
+    rank_only.sort(key=lambda t: t[0])
+    return (with_pct + [r for _, r in rank_only])[:n]
+
+
+def _pika_spreads(items, n: int) -> list[dict]:
+    """
+    [{name, pct}] from Pikalytics' [{nature, ev, percent}]. In the Pokemon Champions data the
+    "ev" string is Stat Points (up to 32 per stat, 66 in all), not EVs — the API says so
+    alongside them. The nature is usually blank there (natures come as a separate list); when
+    present it is prefixed, matching the Smogon spread format.
+    """
+    out = []
+    for it in items or []:
+        if not isinstance(it, dict):
+            continue
+        ev, p = it.get("ev"), _pika_num(it.get("percent"))
+        if not ev or p is None:
+            continue
+        nature = (it.get("nature") or "").strip()
+        out.append({"name": f"{nature}:{ev}" if nature else str(ev), "pct": round(p, 2)})
+    out.sort(key=lambda x: x["pct"], reverse=True)
+    return out[:n]
+
+
+def _pika_leads(items, n: int) -> list[dict]:
+    out = []
+    for it in items or []:
+        if isinstance(it, dict) and it.get("pokemon"):
+            out.append({"name": it["pokemon"], "games": _pika_int(it.get("games")),
+                        "pct": round(_pika_num(it.get("percent")) or 0.0, 2),
+                        "win_pct": _pika_num(it.get("winPercent"))})
+    out.sort(key=lambda x: x["pct"], reverse=True)
+    return out[:n]
+
+
+def stage_pikalytics(db: sqlite3.Connection) -> None:
+    stage("Stage — Pikalytics usage statistics (Pokemon Champions)")
+    if not PIKALYTICS_DIR or not Path(PIKALYTICS_DIR).is_dir():
+        log("  PIKALYTICS_DIR is not set to a directory — skipping.")
+        log("  Run fetch-pikalytics.py first (see its header).")
+        return
+    files = sorted(p for p in Path(PIKALYTICS_DIR).glob("*.json") if _PIKA_NAME_RE.match(p.name))
+    if not files:
+        log(f"  no <format>-<cutoff>-<YYYY-MM>.json files in {PIKALYTICS_DIR} — run fetch-pikalytics.py")
+        return
+
+    known_ids = {r["id"] for r in db.execute("SELECT DISTINCT id FROM species")}
+
+    # usage_extra predates the natures and rank columns. Named-column INSERTs below, so adding
+    # them to an existing table is safe (the positional-INSERT hazard in the schema comment
+    # is about usage_stats).
+    have_cols = {r[1] for r in db.execute("PRAGMA table_info(usage_extra)")}
+    for col, decl in (("natures", "TEXT"), ("pika_rank", "INTEGER")):
+        if col not in have_cols:
+            db.execute(f"ALTER TABLE usage_extra ADD COLUMN {col} {decl}")
+
+    def resolve_id(name: str) -> str:
+        sid = norm(name)
+        row = db.execute(
+            "SELECT canonical_id FROM aliases WHERE alias_norm=? AND kind='species' LIMIT 1",
+            (sid,)).fetchone()
+        return row["canonical_id"] if row else sid
+
+    total = 0
+    for path in files:
+        m = _PIKA_NAME_RE.match(path.name)
+        fmt, cutoff, month = m["fmt"], int(m["cut"]), m["month"]
+        try:
+            blob = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as e:
+            log(f"  ! {path.name}: {e}")
+            continue
+        roster = blob.get("roster") or []
+        if not roster:
+            log(f"  ? {path.name}: empty roster — skipped, existing rows kept")
+            continue
+        source = blob.get("source") or "Pikalytics"
+        data_date = blob.get("date") or month
+
+        best: dict[str, tuple[int, dict, dict]] = {}
+        dupes = 0
+        for e in roster:
+            name = e.get("name")
+            usage_pct = _pika_num(e.get("percent"))
+            # The battle-data format publishes games, a win rate and a RANK but no usage share.
+            # Such an entry is kept with usage NULL rather than dropped, or invented from games.
+            rank = int(_pika_num(e.get("rank"))) if _pika_num(e.get("rank")) is not None else None
+            if not name or (usage_pct is None and rank is None):
+                continue
+            sid = resolve_id(name)
+            raw = _pika_int(e.get("raw_count"), e.get("raw"), e.get("games"))
+            # Several spellings of one name collapse to one id (the roster
+            # really does list Sirfetch'd three times, with different
+            # apostrophe encodings). Keep the best-sampled one.
+            if sid in best:
+                dupes += 1
+                if raw <= best[sid][0]:
+                    continue
+            usage_row = {
+                "format": fmt, "month": month, "cutoff": cutoff, "species_id": sid,
+                "species_name": name, "usage": (usage_pct / 100.0) if usage_pct is not None else None,
+                "raw_count": raw,
+                "moves": json.dumps(_pika_ranked(e.get("moves"), "move", 12)),
+                "items": json.dumps(_pika_ranked(e.get("items"), "item", 8)),
+                "abilities": json.dumps(_pika_ranked(e.get("abilities"), "ability", 5)),
+                "spreads": json.dumps(_pika_spreads(e.get("spreads"), 12)),
+                "teammates": json.dumps(_pika_ranked(e.get("team"), "pokemon", 10)),
+                "counters": "[]",
+            }
+            win = _pika_num(e.get("winRate"))
+            if win is None:
+                w = _pika_num(e.get("winPercent"))
+                win = w / 100.0 if w is not None else None
+            wins, losses = _pika_num(e.get("wins")), _pika_num(e.get("losses"))
+            extra_row = {
+                "format": fmt, "month": month, "cutoff": cutoff, "species_id": sid,
+                "source": source, "win_rate": win,
+                "wins": int(wins) if wins is not None else None,
+                "losses": int(losses) if losses is not None else None,
+                "brought_pct": _pika_num(e.get("brought_percent")),
+                "mega_pct": _pika_num(e.get("mega_percent")),
+                "leads": json.dumps(_pika_leads(e.get("leads"), 8)),
+                "megas": json.dumps(e.get("megas") or []),
+                "data_date": data_date,
+                "natures": json.dumps(_pika_ranked(e.get("natures"), "nature", 8)),
+                "pika_rank": rank,
+            }
+            best[sid] = (raw, usage_row, extra_row)
+
+        rows = [b[1] for b in best.values()]
+        extras = [b[2] for b in best.values()]
+        if not rows:
+            log(f"  ? {path.name}: no usable entries — skipped, existing rows kept")
+            continue
+
+        db.execute("DELETE FROM usage_stats WHERE format=? AND month=? AND cutoff=?",
+                   (fmt, month, cutoff))
+        db.execute("DELETE FROM usage_extra WHERE format=? AND month=? AND cutoff=?",
+                   (fmt, month, cutoff))
+        db.executemany(
+            """INSERT INTO usage_stats
+               (format, month, cutoff, species_id, species_name, usage, raw_count,
+                moves, items, abilities, spreads, teammates, counters)
+               VALUES (:format, :month, :cutoff, :species_id, :species_name, :usage,
+                       :raw_count, :moves, :items, :abilities, :spreads, :teammates,
+                       :counters)""", rows)
+        db.executemany(
+            """INSERT INTO usage_extra
+               (format, month, cutoff, species_id, source, win_rate, wins, losses,
+                brought_pct, mega_pct, leads, megas, data_date, natures, pika_rank)
+               VALUES (:format, :month, :cutoff, :species_id, :source, :win_rate, :wins,
+                       :losses, :brought_pct, :mega_pct, :leads, :megas, :data_date,
+                       :natures, :pika_rank)""",
+            extras)
+        total += len(rows)
+
+        log(f"  {fmt} {month} (cutoff {cutoff}): {len(rows)} entries"
+            + (f", {dupes} duplicate name variant(s) collapsed" if dupes else ""))
+        n_no_usage = sum(1 for r in rows if r["usage"] is None)
+        if n_no_usage:
+            log(f"    {n_no_usage} entries have NO usage share (this format publishes games, win rate and "
+                f"a rank instead): usage stored as NULL, ranked by Pikalytics' own rank")
+        unresolved = [r["species_name"] for r in rows if r["species_id"] not in known_ids]
+        if unresolved:
+            log(f"    {len(unresolved)} names match no species row (kept anyway): {unresolved[:25]}")
+        top = max(roster, key=lambda e: (_pika_num(e.get("percent")) or 0, _pika_num(e.get("games")) or 0))
+        ssum = lambda k: sum(_pika_num(x.get("percent")) or 0
+                             for x in (top.get(k) or []) if isinstance(x, dict))
+        log(f"    sanity ({top.get('name')}): item shares sum to {ssum('items'):.1f}%, "
+            f"ability shares {ssum('abilities'):.1f}%, move percentages {ssum('moves'):.1f}% "
+            f"(only the first two should be ~100)")
+
+    db.commit()
+    set_meta(db, "pikalytics_ingested_at", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+    log(f"  {total} usage rows loaded from {len(files)} file(s)")
+
+
+# ---------------------------------------------------------------------------
+# Stage — species locations
+# ---------------------------------------------------------------------------
+#
+# Parsed from the RAW ZIM HTML of each Bulbapedia species page, deliberately
+# not from wiki_chunks: the flattened chunk text throws away exactly the
+# cell structure this needs (game names and locations run together, and every
+# nested cell appears several times over), while the real table is extremely
+# regular — confirmed directly against Clefable's and Pikachu's actual HTML:
+#
+#   one nested table per generation, headed by a <th>"Generation I"</th>;
+#   inside it, one row per group of games: one or more <th> cells (game
+#   names — Red and Blue share a row, so they share its location) followed by
+#   a <td> holding the location text.
+#
+# Only the main-series section is parsed: everything under the first
+# sub-heading (In side games, In events, promotions...) has a different
+# structure and isn't a per-generation main-series location.
+
+_ROMAN_GENS = {"I": 1, "II": 2, "III": 3, "IV": 4, "V": 5,
+               "VI": 6, "VII": 7, "VIII": 8, "IX": 9, "X": 10}
+_GEN_HEADER_RE = re.compile(r"^Generation ([IVX]+)$")
+_LOCATION_TITLE_SUFFIX = " (Pokémon)"
+# norm() strips the gender symbols (they aren't alphanumeric), collapsing both
+# to "nidoran" — which matches neither real species id.
+_LOCATION_TITLE_OVERRIDES = {"Nidoran♀": "nidoranf", "Nidoran♂": "nidoranm"}
+
+
+def _clean_location_text(text: str) -> str:
+    """
+    Tidy flattened cell text: Bulbapedia's markup puts punctuation in its own
+    text node, so raw extraction gives "Viridian Forest , Power Plant" and
+    "Giant Chasm ( rustling grass )". <br> separators are turned into ";"
+    upstream, so separate entries in one cell stay separate.
+    """
+    parts = []
+    for part in text.split(";"):
+        part = re.sub(r"\s+", " ", part).strip()
+        part = re.sub(r"\s+([,.)])", r"\1", part)
+        part = re.sub(r"\(\s+", "(", part)
+        if part:
+            parts.append(part)
+    return "; ".join(parts)
+
+
+def _parse_locations_html(html: str) -> list[dict]:
+    """
+    Rows of {gen, game, location, seq} from one species page's "Game
+    locations" section, in page order. Empty list if the page has no such
+    section. Every game named in a row's <th> cells gets its own output row
+    carrying that row's location.
+    """
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(html, "lxml")
+    span = soup.find("span", id="Game_locations")
+    if span is None:
+        return []
+    heading = span.find_parent(re.compile(r"^h[1-6]$"))
+    if heading is None:
+        return []
+    for br in soup.find_all("br"):
+        br.replace_with(" ; ")
+
+    rows: list[dict] = []
+    gen: int | None = None
+    seq = 0
+    for sib in heading.find_next_siblings():
+        if re.match(r"^h[1-6]$", sib.name or ""):
+            break
+        for tr in sib.find_all("tr"):
+            ths = tr.find_all("th", recursive=False)
+            if not ths:
+                continue
+            games = [re.sub(r"\s+", " ", th.get_text(" ", strip=True)).strip() for th in ths]
+            games = [g for g in games if g]
+            header = next((m for g in games if (m := _GEN_HEADER_RE.match(g))), None)
+            if header:
+                gen = _ROMAN_GENS.get(header.group(1))
+                continue
+            tds = tr.find_all("td", recursive=False)
+            if gen is None or not games or not tds:
+                continue
+            location = _clean_location_text(
+                " ; ".join(td.get_text(" ", strip=True) for td in tds))
+            if not location:
+                continue
+            for g in games:
+                rows.append({"gen": gen, "game": g, "location": location, "seq": seq})
+                seq += 1
+    return rows
+
+
+def stage_species_locations(db: sqlite3.Connection) -> None:
+    """
+    Where each species can be found, per generation and game, parsed from
+    every Bulbapedia species page's "Game locations" section. Requires the
+    species table (for the id match and each species' debut generation).
+
+    Rows for a generation before the species' debut are dropped — a species
+    can't have a location in a generation it didn't exist in. Article titles
+    that don't match a species are logged rather than guessed at.
+    """
+    stage("Stage — species locations (from Bulbapedia species pages)")
+    debut = {r["id"]: r["g"] for r in db.execute(
+        "SELECT id, MIN(gen) AS g FROM species GROUP BY id")}
+    if not debut:
+        log("  ! species table is empty — run the dex stage first")
+        return
+    zim = _open_zim()
+
+    def resolve_id(name: str) -> str | None:
+        if name in _LOCATION_TITLE_OVERRIDES:
+            return _LOCATION_TITLE_OVERRIDES[name]
+        sid = norm(name)
+        if sid in debut:
+            return sid
+        row = db.execute(
+            "SELECT canonical_id FROM aliases WHERE alias_norm=? AND kind='species' LIMIT 1",
+            (sid,)).fetchone()
+        return row["canonical_id"] if row and row["canonical_id"] in debut else None
+
+    db.execute("DELETE FROM species_locations")
+    seen = parsed = rows_total = pre_debut = 0
+    unmatched: list[str] = []
+    no_rows: list[str] = []
+    by_gen: dict[int, int] = {}
+
+    for entry in _entry_iter(zim):
+        try:
+            if entry.is_redirect:
+                continue
+            title = entry.title or ""
+        except Exception:
+            continue
+        if not title.endswith(_LOCATION_TITLE_SUFFIX):
+            continue
+        seen += 1
+        sid = resolve_id(title[:-len(_LOCATION_TITLE_SUFFIX)])
+        if sid is None:
+            unmatched.append(title)
+            continue
+        html = bytes(entry.get_item().content).decode("utf-8", errors="replace")
+        rows = _parse_locations_html(html)
+        kept = [r for r in rows if r["gen"] >= debut[sid]]
+        pre_debut += len(rows) - len(kept)
+        if not kept:
+            no_rows.append(title)
+            continue
+        db.executemany(
+            "INSERT OR REPLACE INTO species_locations "
+            "(species_id, gen, game, location, seq) VALUES (?, ?, ?, ?, ?)",
+            [(sid, r["gen"], r["game"], r["location"], r["seq"]) for r in kept])
+        parsed += 1
+        rows_total += len(kept)
+        for r in kept:
+            by_gen[r["gen"]] = by_gen.get(r["gen"], 0) + 1
+        if parsed % 250 == 0:
+            log(f"  {parsed} species parsed ({rows_total} rows)...")
+
+    db.commit()
+    log(f"  {seen} species articles found, {parsed} with location data ({rows_total} rows)")
+    log(f"  rows dropped as pre-debut generations: {pre_debut}")
+    log("  rows per generation: " + ", ".join(f"gen {g}: {n}" for g, n in sorted(by_gen.items())))
+    if unmatched:
+        log(f"  ! {len(unmatched)} article titles matched no species id: {unmatched[:15]}")
+    if no_rows:
+        log(f"  {len(no_rows)} species with no parseable location rows: {no_rows[:15]}")
+    set_meta(db, "species_locations_ingested_at",
+             time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+
+
+# HOME's static gender codes: mf = same sprite for both, md / fd = the male / female
+# display of a species whose sexes look different, mo / fo = male-only / female-only
+# species, uk = genderless.
+#
+# An animated sprite has no gender in its filename, so which static row it belongs to
+# has to be read off the static rows that already exist for that form. Order of
+# preference when a form has several: mf, then md (the male display IS the default look
+# of a dimorphic species), then the single-sex/genderless codes, and fd last — the
+# female display is a variant, never the default.
+_ANIMATED_GENDER_PREFERENCE = ("mf", "md", "mo", "fo", "uk", "fd")
+
+
+def _animated_gender(static_genders: set | None) -> str:
+    """
+    The gender code an animated sprite should be filed under so it lands on the SAME row
+    as its form's static sprite. With no static row to attach to (the Z-A Megas have none)
+    it stays "mf", the neutral default.
+
+    Confirmed as a real, not hypothetical, split: the animated ingest used to hardcode
+    "mf" (and, after an earlier fix, "uk" for genderless species only), so a species
+    whose static rows are md/fd (Rattata, Raichu), fo (the Nidoran lines) or mo ended up
+    with its animation on a separate animated-only "mf" row — leaving the static row with
+    no animation, and giving anything that picks "the" row for that species an
+    image-less row to land on.
+    """
+    if not static_genders:
+        return "mf"
+    for g in _ANIMATED_GENDER_PREFERENCE:
+        if g in static_genders:
+            return g
+    return sorted(static_genders)[0]
+
+
+def _absorb_static_rows(entries: dict, target_key: tuple, static_keys: list) -> None:
+    """
+    Attach one form's static sprite(s) to the labeled row that carries its name and
+    animation (the Z-A Megas: the name and animation come from the animated scan, the
+    picture from the static one).
+
+    Usually there is exactly one static row, and it is simply merged into the target.
+    A dimorphic species' Mega can ship as TWO — a male (md) and a female (fd) file for
+    the same form (confirmed: Mega Staraptor). Merging both into one row would keep
+    whichever came first, and the female file sorts first, so instead each gender row is
+    kept and given the Mega's name, and the animation goes on the preferred gender's row
+    (the male display, the same order every other lookup uses). The target row, now
+    redundant, is dropped.
+    """
+    target = entries[target_key]
+    if len(static_keys) == 1:
+        s_row = entries.pop(static_keys[0])
+        target["icon_path"] = target["icon_path"] or s_row["icon_path"]
+        target["preview_path"] = target["preview_path"] or s_row["preview_path"]
+        return
+    keep = _animated_gender({entries[k]["gender"] for k in static_keys})
+    for k in static_keys:
+        row = entries[k]
+        row["forme_name"] = target["forme_name"]
+        if row["gender"] == keep and not row["animated_path"]:
+            row["animated_path"] = target["animated_path"]
+    del entries[target_key]
+
+
 def stage_home_sprites(db: sqlite3.Connection) -> None:
     """
-    Catalog Pokemon HOME sprite/preview images from two local folders.
+    Catalog Pokemon HOME sprite/preview images from two local folders, plus
+    animated sprites from a third, independently-sourced folder using its
+    own naming convention (see _parse_animated_filename).
 
     Optional — skips cleanly if HOME_ICONS_DIR isn't set, same as SETS_DIR.
+    The animated folder is independently optional via HOME_ANIMATED_DIR;
+    icons/previews work fine with no animated source configured at all.
 
-    The two folders are confirmed NOT in lockstep (3035 icon files vs 3029
-    preview files in the real archive this was built against), so a file
-    present in one and missing from the other is handled as a real case, not
-    an error — icon_path or preview_path can each independently be NULL.
+    The two static folders are confirmed NOT in lockstep (3035 icon files vs
+    3029 preview files in the real archive this was built against), so a
+    file present in one and missing from the other is handled as a real
+    case, not an error — icon_path or preview_path can each independently be
+    NULL. The animated folder has its own, different coverage gap: no
+    Gigantamax forms at all, confirmed directly against the real archive.
 
     Forme names are only ever set from the verified multi-gen otherFormes
     match (_build_forme_order_map) — a form index with no match at that
     position stores forme_name=NULL rather than a guessed label. An
     unlabeled alt-form image is still a correct, usable image; a
-    wrongly-labeled one is worse than no label at all.
+    wrongly-labeled one is worse than no label at all. Animated filenames
+    encode "base" and "female" directly — neither is a forme (female is a
+    cosmetic gender difference, same battle entity, handled via this
+    table's own gender field) — so only genuine alternate forms (mega,
+    alola, etc.) go through the otherFormes match at all.
     """
     stage("Stage — Pokemon HOME sprites (optional)")
 
@@ -1515,7 +2701,9 @@ def stage_home_sprites(db: sqlite3.Connection) -> None:
         "exists in gens 6-7's own dex data, regional/cosmetic formes only "
         "in later gens — merging both is required to catch everything)")
     forme_map = _build_forme_order_map(SIM_URL)
-    log(f"  {len(forme_map)} species have at least one known alternate forme")
+    forme_map.update(HOME_FORME_ORDER_OVERRIDES)
+    log(f"  {len(forme_map)} species have at least one known alternate forme"
+        f" ({len(HOME_FORME_ORDER_OVERRIDES)} with HOME's own order substituted)")
 
     db.execute("DELETE FROM home_sprites")
 
@@ -1536,7 +2724,8 @@ def stage_home_sprites(db: sqlite3.Connection) -> None:
                 "natdex": parsed["natdex"], "form_index": parsed["form_index"],
                 "gender": parsed["gender"], "is_gmax": parsed["is_gmax"],
                 "is_shiny": parsed["is_shiny"], "forme_name": None,
-                "icon_path": None, "preview_path": None, "source_file": f.name,
+                "icon_path": None, "preview_path": None, "animated_path": None,
+                "source_file": f.name,
             })
             row[path_field] = f"{url_prefix}/{f.name}" if url_prefix else f.name
         log(f"  {folder}: {found} files, {matched} parsed "
@@ -1555,33 +2744,375 @@ def stage_home_sprites(db: sqlite3.Connection) -> None:
     else:
         log("  HOME_PREVIEWS_DIR not set — icons only, no hero images")
 
+    # Animated sprites use a completely different naming convention (this
+    # project's own normalized form: {dex:04d}_{species}_{form}_{variant}.gif)
+    # from a different, later-added source — so this gets its own scan rather
+    # than reusing scan() above, which expects HOME's own filename encoding.
+    #
+    # Two form values are NOT formes at all and are handled before ever
+    # touching forme_map: "base" is the default form (form_index=0), and
+    # "female" is a purely cosmetic gender difference (Venusaur, Butterfree,
+    # Rattata all have one) — same species, same battle entity, just a
+    # different display sprite for female individuals. That's exactly the
+    # axis this table's own gender field already exists to carry, so it maps
+    # to form_index=0, gender "fd", not a new forme lookup. Confirmed
+    # directly against the real archive: those are real, present cases, not
+    # a hypothetical.
+    #
+    # "base" is NOT always gender "mf" — a genderless species (confirmed
+    # real and broken before this fix: Zygarde) uses "uk" in the static
+    # scan's own convention, and assuming "mf" split every genderless
+    # species' base form across two separate, half-empty rows: one
+    # animated-only at gender "mf", one static-only at gender "uk" — neither
+    # complete on its own, and species_sprite()'s base-form query (no gender
+    # filter) could land on either one unpredictably. Determined here from
+    # what the static scan (already complete at this point) actually found,
+    # not assumed.
+    if HOME_FORM_REMAP:
+        remapped: dict = {}
+        for k, row in entries.items():
+            new_fi = HOME_FORM_REMAP.get(k[0], {}).get(k[1], k[1])
+            if new_fi != k[1]:
+                row["form_index"] = new_fi
+                k = (k[0], new_fi, k[2], k[3], k[4])
+            remapped[k] = row
+        entries = remapped
+        log(f"  {sum(len(v) for v in HOME_FORM_REMAP.values())} HOME form numbers renumbered "
+            f"({', '.join(f'#{d}' for d in HOME_FORM_REMAP)})")
+    # The general form of the genderless fix above: which gender codes the STATIC scan
+    # found for each (natdex, form_index, is_gmax). Snapshotted here, before any animated
+    # row exists, so an animated row created below (say a "female" one) can't change which
+    # row a later animated file attaches to.
+    static_genders: dict[tuple, set] = {}
+    for k in entries:
+        static_genders.setdefault((k[0], k[1], k[3]), set()).add(k[2])
+    #
+    # A second forme source, used as a FALLBACK when the first (below) finds
+    # no match: the Legends Z-A / Champions Megas (stage_za_champions_megas)
+    # live entirely in this project's own species table, with zero @pkmn/dex
+    # data — so forme_map (sourced from pokedex-sim's live dex dump) can
+    # never match them. Confirmed directly as a real, not hypothetical, gap:
+    # animated files for these Megas (Zygarde's own included) sit correctly
+    # named in the archive but were being silently discarded on every
+    # ingest, since nothing else ever checked the species table for a name
+    # to match against. Assigned form_index values starting well above any
+    # realistic @pkmn/dex-native forme count, so they can never collide with
+    # a real position from the primary forme_map below.
+    za_mega_formes: dict[int, list[str]] = {}
+    for row in db.execute("SELECT num, name FROM species WHERE forme LIKE 'Mega%ZA'"):
+        za_mega_formes.setdefault(row["num"], []).append(row["name"])
+    ZA_MEGA_FORM_INDEX_BASE = 100
+    # Visual-only forms (VISUAL_ONLY_FORMES) as a third place an animated slug can match, after
+    # the simulator's formes and the Z-A Megas: Minior's colour GIFs have no forme entry at all.
+    # Read from the constant plus the species table rather than the visual_forms table, so this
+    # stage does not depend on --extra-forms-only having run first.
+    visual_formes: dict[int, list[str]] = {}
+    for _vname, _vbase in VISUAL_ONLY_FORMES.items():
+        _vrow = db.execute("SELECT num FROM species WHERE id=? LIMIT 1", (norm(_vbase),)).fetchone()
+        if _vrow:
+            visual_formes.setdefault(_vrow["num"], []).append(_vname)
+    VISUAL_FORM_INDEX_BASE = 300
+    #
+    # Everything else (mega, mega-x, mega-y, alola, and presumably any other
+    # regional/battle form this archive picks up later) is matched against
+    # the SAME forme_map already built above via _match_animated_form —
+    # tested directly against a single-Mega species, a dual-Mega species
+    # (confirming -X and -Y resolve to their own, not each other's, index),
+    # and a regional form.
+    if HOME_ANIMATED_DIR:
+        animated_dir = Path(HOME_ANIMATED_DIR)
+        if animated_dir.is_dir():
+            animated_url = f"{HOME_SPRITES_URL}/animated" if HOME_SPRITES_URL else ""
+            found = matched = unmatched = za_mega_matched = visual_matched = 0
+            for f in sorted(animated_dir.glob("*.gif")):
+                found += 1
+                parsed = _parse_animated_filename(f.name)
+                if not parsed:
+                    continue
+
+                eff_slug = ANIMATED_SLUG_SYNONYMS.get((parsed["natdex"], parsed["form_slug"]),
+                                                      parsed["form_slug"])
+                if eff_slug == "base":
+                    form_index = 0
+                    gender = _animated_gender(static_genders.get((parsed["natdex"], 0, False)))
+                elif eff_slug == "female":
+                    form_index, gender = 0, "fd"
+                else:
+                    slug = eff_slug
+                    formes = forme_map.get(parsed["natdex"], [])
+                    idx = _match_animated_form(slug, formes)
+                    if idx is not None:
+                        form_index = idx
+                        gender = _animated_gender(static_genders.get(
+                            (parsed["natdex"], idx, parsed["form_slug"] == "gmax")))
+                    else:
+                        za_formes = za_mega_formes.get(parsed["natdex"], [])
+                        za_idx = _match_animated_form(slug, za_formes)
+                        if za_idx is not None:
+                            form_index, gender = ZA_MEGA_FORM_INDEX_BASE + za_idx, "mf"
+                            za_mega_matched += 1
+                        else:
+                            v_idx = _match_animated_form(slug, visual_formes.get(parsed["natdex"], []))
+                            if v_idx is None:
+                                unmatched += 1
+                                continue
+                            form_index, gender = VISUAL_FORM_INDEX_BASE + v_idx, "mf"
+                            visual_matched += 1
+
+                is_gmax = parsed["form_slug"] == "gmax"
+                matched += 1
+                key = (parsed["natdex"], form_index, gender, is_gmax, parsed["is_shiny"])
+                row = entries.setdefault(key, {
+                    "natdex": parsed["natdex"], "form_index": form_index,
+                    "gender": gender, "is_gmax": is_gmax,
+                    "is_shiny": parsed["is_shiny"], "forme_name": None,
+                    "icon_path": None, "preview_path": None, "animated_path": None,
+                    "source_file": f.name,
+                })
+                row["animated_path"] = f"{animated_url}/{f.name}" if animated_url else f.name
+
+            log(f"  {animated_dir}: {found} files, {matched} parsed "
+                f"({za_mega_matched} matched via this project's own Z-A/Champions "
+                f"Mega species table rather than @pkmn/dex, "
+                f"{visual_matched} to a visual-only form, "
+                f"{found - matched - unmatched} did not match the filename "
+                f"pattern, {unmatched} matched the pattern but named a form "
+                f"not found in either forme source)")
+        else:
+            log(f"  ! HOME_ANIMATED_DIR={HOME_ANIMATED_DIR!r} is not a directory — skipping")
+    else:
+        log("  HOME_ANIMATED_DIR not set — no animated sprite option")
+
     # Resolve forme_name: form 0 is always the base form (name=None is
     # correct — the species' own name already covers it). Form N>0 looks up
     # position N-1 in that species' merged forme list; if the list doesn't
-    # reach that far, it stays unlabeled rather than guessed.
+    # reach that far, it stays unlabeled rather than guessed. A form_index
+    # at or above ZA_MEGA_FORM_INDEX_BASE was matched via the Z-A/Champions
+    # species-table fallback above, not @pkmn/dex — resolved against
+    # za_mega_formes instead, using the same real name already matched at
+    # ingest time rather than leaving it unlabeled just because forme_map
+    # (correctly) has nothing at that position.
     labeled = 0
     for row in entries.values():
         if row["form_index"] == 0:
             continue
+        if row["form_index"] >= VISUAL_FORM_INDEX_BASE:
+            v_names = visual_formes.get(row["natdex"], [])
+            v_pos = row["form_index"] - VISUAL_FORM_INDEX_BASE - 1
+            if 0 <= v_pos < len(v_names):
+                row["forme_name"] = v_names[v_pos]
+                labeled += 1
+            continue
+        if row["form_index"] >= ZA_MEGA_FORM_INDEX_BASE:
+            za_formes = za_mega_formes.get(row["natdex"], [])
+            idx = row["form_index"] - ZA_MEGA_FORM_INDEX_BASE - 1
+            if 0 <= idx < len(za_formes):
+                row["forme_name"] = za_formes[idx]
+                labeled += 1
+            continue
         formes = forme_map.get(row["natdex"], [])
         idx = row["form_index"] - 1
-        if 0 <= idx < len(formes):
+        if 0 <= idx < len(formes) and formes[idx]:
             row["forme_name"] = formes[idx]
             labeled += 1
 
+    # Merge each labeled-but-imageless row with any real, unlabeled static
+    # sprite for the SAME (natdex, is_shiny) — the same underlying problem
+    # shows up in two different ways, both confirmed directly rather than
+    # assumed:
+    # - A new Z-A Mega row (form_index >= ZA_MEGA_FORM_INDEX_BASE): labeling
+    #   it directly above "uses up" the name, so main.py's own 1-to-1 merge
+    #   (which needs an UNCOVERED name to fire) can no longer attach a real
+    #   static sprite sitting at its own ordinary form_index — the Mega
+    #   Clefable case from earlier tonight.
+    # - An EXISTING, real forme (form_index < ZA_MEGA_FORM_INDEX_BASE):
+    #   HOME's own form_index numbering doesn't always align with
+    #   @pkmn/dex's otherFormes ordering for a given species, so the SAME
+    #   forme can end up correctly labeled on one row (typically the
+    #   animated one, matched by name via _match_animated_form) while a
+    #   separate, real static sprite for that exact same forme sits
+    #   unlabeled at a different, misaligned form_index. Confirmed directly:
+    #   Zygarde-Complete's real static sprite sits unlabeled at form_index
+    #   4, while its animated-only counterpart was already correctly
+    #   labeled "Zygarde-Complete" at a different position.
+    # Both are the same fix: a name with no picture, and a picture with no
+    # name, are the same real thing split across two rows.
+    #
+    # Handles N-to-N, not just 1-to-1 — a dual-Mega species (Raichu) has TWO
+    # labeled rows and TWO real unlabeled static candidates for the same
+    # (natdex, is_shiny), and guessing which goes with which would have been
+    # exactly the kind of wrong merge this whole mechanism exists to avoid.
+    # Confirmed directly, not assumed: form_index 2 is Mega X's real sprite,
+    # form_index 3 is Mega Y's — sorting BOTH sides ascending (form_index
+    # ascending against forme_name ascending, which naturally orders Mega-X
+    # before Mega-Y before Mega-Z) and pairing positionally reproduces this
+    # exact, confirmed mapping. Only merged when the COUNTS match exactly on
+    # both sides — a species with more unlabeled static rows than labeled-
+    # but-imageless rows (a real, separate, documented gap) is left alone
+    # rather than risk attaching the wrong image to the wrong forme.
+
+    # Apply confirmed overrides FIRST, as a direct merge — before the
+    # general heuristic below even looks at these rows. Necessary, not
+    # redundant: two unrelated formes competing for the same natdex's
+    # unlabeled candidates (Zygarde's real "Complete" form vs. its new
+    # Mega) have no principled sort order between them the way a genuine
+    # X/Y/Z sibling family does, so this is resolved from a human-verified
+    # mapping instead of a guess.
+    override_merged = override_labeled = 0
+    for (o_natdex, o_form_index), o_forme_name in CONFIRMED_FORM_INDEX_OVERRIDES.items():
+        by_shiny: dict = {}
+        for k, row in entries.items():
+            if row["natdex"] == o_natdex and row["form_index"] == o_form_index:
+                by_shiny.setdefault(row["is_shiny"], []).append(k)
+        for is_shiny, keys in by_shiny.items():
+            target_key = next(
+                (k for k, row in entries.items()
+                 if row["natdex"] == o_natdex and row["is_shiny"] == is_shiny
+                 and row["forme_name"] == o_forme_name and k not in keys),
+                None,
+            )
+            if target_key is not None:
+                _absorb_static_rows(entries, target_key, keys)
+                override_merged += 1
+            else:
+                # Nothing carries this name yet — the Z-A Megas only get a row from an
+                # animated file, so a Mega with a static sprite but NO animated one
+                # (confirmed: Tatsugiri) has no row to merge into. Label the static row(s)
+                # directly instead of leaving the sprite nameless.
+                for k in keys:
+                    entries[k]["forme_name"] = o_forme_name
+                override_labeled += 1
+
+    za_merged = 0
+    za_labeled_keys = [
+        key for key, row in entries.items()
+        if 0 < row["form_index"] < VISUAL_FORM_INDEX_BASE and row["forme_name"]
+        and not row["icon_path"] and not row["preview_path"]
+    ]
+    # ^ Visual-form rows (index 300+) are excluded ON PURPOSE. Their names are siblings (Minior's
+    # colours), and pairing siblings with unlabeled sprites is done by sorting names — right for
+    # Mega-X/Mega-Y, silently wrong for Blue/Green/Indigo/Orange. Only a confirmed override may
+    # attach a static sprite to one of them.
+
+    def _sibling_prefix(name: str) -> str:
+        return name.rsplit("-", 1)[0] if "-" in name else name
+
+    groups: dict[tuple, list] = {}
+    for key in za_labeled_keys:
+        natdex, _, _, _, is_shiny = key
+        prefix = _sibling_prefix(entries[key]["forme_name"])
+        groups.setdefault((natdex, is_shiny, prefix), []).append(key)
+
+    for (natdex, is_shiny, _prefix), za_keys in groups.items():
+        # Candidates are counted per FORM, not per row: one form can have several
+        # static rows (a male and a female file for the same Mega), and counting rows
+        # made a single Mega look like two candidates and get skipped.
+        cand_by_form: dict[int, list] = {}
+        for k, row in entries.items():
+            if (row["natdex"] == natdex
+                    and row["is_shiny"] == is_shiny
+                    and 0 < row["form_index"] < ZA_MEGA_FORM_INDEX_BASE
+                    and row["forme_name"] is None
+                    and (row["icon_path"] or row["preview_path"])):
+                cand_by_form.setdefault(row["form_index"], []).append(k)
+        if len(cand_by_form) != len(za_keys):
+            continue
+        za_keys_sorted = sorted(za_keys, key=lambda k: entries[k]["forme_name"])
+        for za_key, form_index in zip(za_keys_sorted, sorted(cand_by_form)):
+            _absorb_static_rows(entries, za_key, cand_by_form[form_index])
+            za_merged += 1
+
+    # One HOME sprite serving several Showdown names (CONFIRMED_SAME_FORM). Done last, after
+    # every merge above, so the copies are never mistaken for merge candidates. A name that
+    # already has a row of its own is left alone.
+    shared_forms = 0
+    next_shared: dict[int, int] = {}
+    for (s_natdex, owner), others in CONFIRMED_SAME_FORM.items():
+        owner_rows = [r for r in entries.values()
+                      if r["natdex"] == s_natdex and r["forme_name"] == owner]
+        for name in others:
+            if not owner_rows or any(r["natdex"] == s_natdex and r["forme_name"] == name
+                                     for r in entries.values()):
+                continue
+            idx = SHARED_FORM_INDEX_BASE + next_shared.get(s_natdex, 0)
+            next_shared[s_natdex] = next_shared.get(s_natdex, 0) + 1
+            for r in owner_rows:
+                dup = dict(r)
+                dup["forme_name"], dup["form_index"] = name, idx
+                entries[(s_natdex, idx, dup["gender"], dup["is_gmax"], dup["is_shiny"])] = dup
+                shared_forms += 1
+
+    # BASE_FORM_ALSO_NAMED: copy the default form's rows under the extra name(s).
+    base_aliased = 0
+    for b_natdex, b_names in BASE_FORM_ALSO_NAMED.items():
+        b_rows = [r for r in entries.values()
+                  if r["natdex"] == b_natdex and r["form_index"] == 0 and not r["is_gmax"]]
+        for i, name in enumerate(b_names):
+            if any(r["natdex"] == b_natdex and r["forme_name"] == name for r in entries.values()):
+                continue
+            for r in b_rows:
+                dup = dict(r)
+                dup["forme_name"], dup["form_index"] = name, BASE_ALIAS_FORM_INDEX_BASE + i
+                entries[(b_natdex, dup["form_index"], dup["gender"], dup["is_gmax"], dup["is_shiny"])] = dup
+                base_aliased += 1
+    if base_aliased:
+        log(f"  {base_aliased} rows copied from the default form under a second name (BASE_FORM_ALSO_NAMED)")
+
+    # SHARED_SHINY_STILL: forms with no shiny still of their own get another form's. Done
+    # last, after every merge, so the copies are never mistaken for merge candidates.
+    shared_shiny = 0
+    for s_natdex, (s_source, s_names) in SHARED_SHINY_STILL.items():
+        src = next((r for r in entries.values()
+                    if r["natdex"] == s_natdex and r["forme_name"] == s_source
+                    and r["is_shiny"] and (r["icon_path"] or r["preview_path"])), None)
+        if not src:
+            continue
+        for name in s_names:
+            normal = next((r for r in entries.values() if r["natdex"] == s_natdex
+                           and r["forme_name"] == name and not r["is_shiny"]), None)
+            if not normal:
+                continue
+            have = next((k for k, r in entries.items() if r["natdex"] == s_natdex
+                         and r["forme_name"] == name and r["is_shiny"]), None)
+            if have and (entries[have]["icon_path"] or entries[have]["preview_path"]):
+                continue                                   # it has a shiny still of its own
+            if have:
+                entries[have]["icon_path"], entries[have]["preview_path"] = src["icon_path"], src["preview_path"]
+            else:
+                dup = dict(normal)
+                dup.update(is_shiny=src["is_shiny"], icon_path=src["icon_path"],
+                           preview_path=src["preview_path"], animated_path=None)
+                entries[(s_natdex, dup["form_index"], dup["gender"], dup["is_gmax"], dup["is_shiny"])] = dup
+            shared_shiny += 1
+    if shared_shiny:
+        log(f"  {shared_shiny} forms given their base form's shiny still (SHARED_SHINY_STILL)")
+
     rows = [
-        (r["natdex"], r["form_index"], r["gender"], int(r["is_gmax"]), int(r["is_shiny"]),
-         r["forme_name"], r["icon_path"], r["preview_path"], r["source_file"])
+        {"natdex": r["natdex"], "form_index": r["form_index"], "gender": r["gender"],
+         "is_gmax": int(r["is_gmax"]), "is_shiny": int(r["is_shiny"]),
+         "forme_name": r["forme_name"], "icon_path": r["icon_path"],
+         "preview_path": r["preview_path"], "animated_path": r["animated_path"],
+         "source_file": r["source_file"]}
         for r in entries.values()
     ]
     db.executemany(
-        "INSERT OR REPLACE INTO home_sprites VALUES (?,?,?,?,?,?,?,?,?)", rows)
+        """INSERT OR REPLACE INTO home_sprites
+           (natdex, form_index, gender, is_gmax, is_shiny, forme_name,
+            icon_path, preview_path, animated_path, source_file)
+           VALUES
+           (:natdex, :form_index, :gender, :is_gmax, :is_shiny, :forme_name,
+            :icon_path, :preview_path, :animated_path, :source_file)""",
+        rows)
     db.commit()
 
     alt_forms = sum(1 for r in entries.values() if r["form_index"] > 0)
+    animated_count = sum(1 for r in entries.values() if r.get("animated_path"))
     log(f"  {len(entries)} unique sprite entries "
         f"({alt_forms} alternate forms, {labeled} confidently labeled, "
-        f"{alt_forms - labeled} unlabeled)")
+        f"{alt_forms - labeled} unlabeled, {animated_count} with an animated sprite, "
+        f"{za_merged} rows merged by heuristic, {override_merged} merged via confirmed override, "
+        f"{override_labeled} labeled in place, "
+        f"{shared_forms} rows shared between Showdown names for one HOME form)")
     set_meta(db, "home_sprites_ingested_at",
              time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
 
@@ -2390,6 +3921,21 @@ def main() -> None:
                     help="parse type/stat-boosting item categories out of "
                          "already-ingested wiki articles — requires "
                          "stage_wiki and stage_dex to have already run")
+    ap.add_argument("--za-megas-only", action="store_true",
+                    help="parse Legends Z-A / Champions Mega Evolutions out "
+                         "of already-ingested wiki articles into the species "
+                         "table — requires stage_wiki to have already run")
+    ap.add_argument("--locations-only", action="store_true",
+                    help="parse per-generation game locations for every species "
+                         "from the ZIM's Bulbapedia species pages — requires the "
+                         "species table (stage_dex) to have already run")
+    ap.add_argument("--pikalytics-only", action="store_true",
+                    help="load Pokemon Champions usage from the JSON files "
+                         "fetch-pikalytics.py wrote into PIKALYTICS_DIR — run "
+                         "--aliases-only first so names resolve to species ids")
+    ap.add_argument("--extra-forms-only", action="store_true",
+                    help="add the curated extra species (Floette-Eternal) and register the "
+                         "visual-only forms — run --aliases-only first")
     ap.add_argument("--aliases-only", action="store_true")
     ap.add_argument("--sets-only", action="store_true",
                     help="reload Smogon sets from SETS_DIR")
@@ -2433,7 +3979,8 @@ def main() -> None:
 
     selective = any([args.dex_only, args.stats_only, args.wiki_only,
                      args.images_only, args.sprites_only, args.aliases_only,
-                     args.embed_only, args.sets_only, args.item_categories_only])
+                     args.embed_only, args.sets_only, args.item_categories_only,
+                     args.za_megas_only, args.locations_only, args.pikalytics_only, args.extra_forms_only])
 
     _open_log()
 
@@ -2474,6 +4021,14 @@ def main() -> None:
             stage_home_sprites(db); checkpoint(db)
         elif args.item_categories_only:
             stage_item_categories(db); checkpoint(db)
+        elif args.za_megas_only:
+            stage_za_champions_megas(db); checkpoint(db)
+        elif args.locations_only:
+            stage_species_locations(db); checkpoint(db)
+        elif args.pikalytics_only:
+            stage_pikalytics(db); checkpoint(db)
+        elif args.extra_forms_only:
+            stage_extra_forms(db); checkpoint(db)
         elif args.aliases_only:
             stage_aliases(db); checkpoint(db)
         elif args.embed_only:
@@ -2485,7 +4040,11 @@ def main() -> None:
             stage_analyses(db); checkpoint(db)
             stage_sets(db); checkpoint(db)
             stage_item_categories(db); checkpoint(db)
+            stage_za_champions_megas(db); checkpoint(db)
             stage_aliases(db); checkpoint(db)
+            stage_extra_forms(db); checkpoint(db)
+            stage_species_locations(db); checkpoint(db)
+            stage_pikalytics(db); checkpoint(db)
             stage_embed(db, args.batch_size); checkpoint(db)
 
         set_status(db, "complete", f"finished in {time.time() - t0:.0f}s")
