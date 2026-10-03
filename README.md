@@ -29,6 +29,14 @@ you already run. Skip the ones that don't apply
 
 ## Updates
 
+### [2026-10-03]
+* **NEW:** Cosmetic forms are clickable, including Gigantimax Forms. Also Fixes Vivillion visual forms)
+* **NEW:** `POST /learnset` returns every move a Pokémon learns in a generation, grouped by level-up, TM, tutor, egg and event, for a learnset page.
+* **NEW:** A second Pokémon Champions data set from Pikalytics (Reg M-B battle data) with win rates, natures and spreads. Its spreads are in Stat Points, not EVs, and it publishes no usage share, so the API reports games and rank instead of a percentage.
+* **NEW:** Eternal Flower Floette has its own entry and stats, and every Legends Z-A / Champions Mega now has a picture.
+* **FIX:** "Can X learn Y in generation N"
+* **FIX:** Sprite labels for forms where Pokémon HOME numbers things differently from Showdown: Pikachu's caps (they were labelled as Cosplay forms), Minior (the Meteor Form is the default), Vivillon (Meadow is the base), Magearna, Floette, Tatsugiri and Greninja.
+
 ### [2026-09-29]
 * **NEW:** Added Pikalytics data as a source for competitive data for ZA and Champions.
 * **NEW:** Added animated sprites
@@ -1366,7 +1374,7 @@ both sexes), `md` / `fd` (the male / female look of a species whose sexes differ
 N+1). That is a guess about HOME's numbering, and it holds for most species. It
 fails where HOME numbers differently from Showdown — confirmed for Greninja
 (HOME has one Ash/Bond form, Showdown two names), Floette, Zygarde, Magearna and
-Tatsugiri, and Pikachu, where HOME numbers the caps 001–007 and 009 while the simulator lists the Cosplay forms first, so the rule labelled the caps as Cosplay Pikachu; and Minior, where HOME's form 0 is the Meteor Form (the in-game default) but the simulator's plain "Minior" is the Core, so the same picture must serve both `Minior` and `Minior-Meteor` — and it can't name anything the simulator doesn't know about (the Legends Z-A Megas). A form the rule can't name stays *unlabeled*, never guessed. **A wrong label is harder to spot than a missing one**: it never appears in the list of Pokémon without an image, so if a form's name looks odd, check it with `sprite_dump.py`.
+Tatsugiri, and Pikachu, where HOME numbers the caps 001–007 and 009 while the simulator lists the Cosplay forms first, so the rule labelled the caps as Cosplay Pikachu; and Minior, where HOME's form 0 is the Meteor Form (the in-game default) but the simulator's plain "Minior" is the Core, so the same picture must serve both `Minior` and `Minior-Meteor`; and Vivillon, where HOME numbers its twenty patterns in the game's own list order (form 0 is Icy Snow, the base Meadow is form 6) and the simulator knows only Fancy and Pokeball, which the rule had filed under the Polar and Tundra pictures — and it can't name anything the simulator doesn't know about (the Legends Z-A Megas). A form the rule can't name stays *unlabeled*, never guessed. **A wrong label is harder to spot than a missing one**: it never appears in the list of Pokémon without an image, so if a form's name looks odd, check it with `sprite_dump.py`.
 
 **Which row an animation joins.** An animated filename has no gender. The ingest
 files it under the gender of the static row that already exists for that form,
@@ -1390,13 +1398,13 @@ several first guesses in the sprite-naming plan were wrong.
 | Table | What it says | Current entries |
 |---|---|---|
 | `CONFIRMED_FORM_INDEX_OVERRIDES` | This `(dex, form_index)` static sprite is this named form. Merges into the animated row of that name, or labels the sprite in place if there isn't one. | Zygarde 004 Complete / 005 Mega; Greninja 001 Mega; Magearna 002 Mega / 003 Original Color Mega; Floette 005 Mega / 006 Eternal; Tatsugiri 003 / 004 / 005 Curly / Droopy / Stretchy Mega; Minior 007–013 Red / Orange / Yellow / Green / Blue / Indigo / Violet |
-| `HOME_FORME_ORDER_OVERRIDES` | HOME's own form order for a species, replacing the simulator's. Position N is HOME form N+1; `None` marks a number HOME skips. Both the still labels and the animation matching follow it. | Pikachu: 001 Original, 002 Hoenn, 003 Sinnoh, 004 Unova, 005 Kalos, 006 Alola, 007 Partner, (008 skipped), 009 World |
-| `HOME_FORM_REMAP` | HOME's form 0 isn't the look the dex should default to, so renumber its forms before anything is labeled. | None at present (Minior was tried and reverted: its form 0, the Meteor Form, is the in-game default) |
+| `HOME_FORME_ORDER_OVERRIDES` | HOME's own form order for a species, replacing the simulator's. Position N is HOME form N+1; `None` marks a number HOME skips. Both the still labels and the animation matching follow it. | Pikachu: 001 Original, 002 Hoenn, 003 Sinnoh, 004 Unova, 005 Kalos, 006 Alola, 007 Partner, (008 skipped), 009 World. Vivillon: HOME's pattern order written after the 0↔6 swap, so 018 is Fancy and 019 Pokeball |
+| `HOME_FORM_REMAP` | HOME's form 0 isn't the look the dex should default to, so renumber its forms before anything is labeled. | Vivillon: 0 (Icy Snow) ↔ 6 (Meadow), so the species' real base pattern is the default. (Minior was tried and reverted: its form 0, the Meteor Form, is the in-game default.) |
 | `SHARED_SHINY_STILL` | These forms have no shiny still of their own and share another named form's. | Minior's colours share the one "Shiny Core" (Red's shiny) |
-| `BASE_FORM_ALSO_NAMED` | The default form is also a named form the simulator treats separately; its rows are copied under that name. | Minior: form 0 (Meteor Form) is also `Minior-Meteor` |
-| `CONFIRMED_SAME_FORM` | Two Showdown names are one HOME form; the second gets a copy of the first's sprite. | Greninja-Ash / Greninja-Bond |
+| `BASE_FORM_ALSO_NAMED` | The default form is also a named form the simulator treats separately; its rows are copied under that name. | Minior: form 0 (Meteor Form) is also `Minior-Meteor`. Vivillon: form 0 (Meadow) is also `Vivillon-Meadow` |
+| `CONFIRMED_SAME_FORM` | Two Showdown names are one HOME form; the second gets a copy of the first's sprite. | Greninja-Ash / Greninja-Bond; Toxtricity-Gmax / Toxtricity-Low-Key-Gmax (HOME has one Gigantamax Toxtricity sprite, `000` category `g`; `001` is the ordinary Low Key form) |
 | `ZA_MEGA_FORM_VARIANTS` | One parsed Mega has several forms sharing its stats; each gets its own named row. | Tatsugiri-Mega → Droopy and Stretchy |
-| `ANIMATED_SLUG_SYNONYMS` | An animated slug names a form the species table has under a plainer name. | Tatsugiri `mega-curly` → the plain Mega; Pikachu `<cap>-cap` → the cap's own name |
+| `ANIMATED_SLUG_SYNONYMS` | An animated slug names a form the species table has under a plainer name. | Tatsugiri `mega-curly` → the plain Mega; Pikachu `<cap>-cap` → the cap's own name; Vivillon `poke-ball` → Pokeball (the archive splits the word) |
 
 The workflow:
 
@@ -1600,7 +1608,7 @@ generation Floette exists in.
 
 **`VISUAL_ONLY_FORMES`** lists forms that differ from their base species only in
 appearance — Pikachu's caps, Pichu-Spiky-eared, Antique Sinistea and Polteageist,
-Artisan Poltchageist, Masterpiece Sinistcha, and Minior's seven core colours, Red included (the Meteor Form is not one: it has different stats, and it is the dex default). A visual form:
+Artisan Poltchageist, Masterpiece Sinistcha, Minior's seven core colours, Red included (the Meteor Form is not one: it has different stats, and it is the dex default), and all twenty of Vivillon's patterns (Meadow, the base, among them). A visual form:
 
 - is **clickable**: `/lookup` on it succeeds even when no species row exists;
 - answers with the **base species' data** — stats, typing, abilities, learnset,
@@ -1617,6 +1625,18 @@ unique move, and Rockruff-Dusk is ability-related, not visual. The ingest log
 therefore prints the forms whose data *is* identical to their base as candidates to
 review. To add one, confirm it really is only cosmetic, add `"Form-Name": "Base"`,
 run `--extra-forms-only`, and check `/lookup` on it.
+
+**Gigantamax forms** work the same way but are not on a list. The sprite stage names every Gigantamax
+sprite `<form>-Gmax` (`Charizard-Gmax`, `Urshifu-Gmax`, `Urshifu-Rapid-Strike-Gmax`) and registers it as a
+visual-style form of the form it belongs to, straight from the sprite table; the extra-forms stage
+re-registers them after it rebuilds the registry, so either stage may run first. A click answers with
+the base's stats, typing, abilities and learnset and the Gigantamax form's own stills. The note and
+`visual_kind` say `gigantamax` rather than `cosmetic`, because Gigantamax is a temporary Generation 8
+battle form with its own G-Max move, so "purely visual" would be wrong. HOME files a Gigantamax sprite under the same form number as its ordinary form,
+telling them apart only by the `g` category in the filename; the name lookup in the API therefore asks for
+Gigantamax rows only for a `-Gmax` name and never otherwise. There are no Gigantamax animations in the
+animated archive, so a Gigantamax form shows its still and no animation, and does not borrow the base's
+(which would pair two different looks).
 
 Sprites for these come from the same pipeline as everything else. Where a form has a still of its own (all of Pikachu's caps do) it is used; where it doesn't, the base picture is shown instead.
 
@@ -2584,6 +2604,7 @@ All on `pokedex-api`.
 | `usage_stats` for a Champions format reports no entry for a month | Older versions used one global "latest month" | Current `main.py` defaults to the latest month *for that format* |
 | Pikalytics ingest logs names that "match no species row" | Cosmetic forms (Alcremie flavours, Vivillon patterns, Furfrou trims) and the like | Expected; the rows are kept. Add an alias only if it's a real species |
 | A cosmetic form isn't clickable, or `/lookup` says it isn't found | It isn't in `VISUAL_ONLY_FORMES`, or `--extra-forms-only` hasn't run | Step 2f |
+| A Gigantamax form isn't clickable or has no name, or the plain Urshifu-Rapid-Strike shows a Gigantamax picture | The database predates the Gigantamax naming (those rows were unlabeled, and Urshifu's shared the ordinary form's label) | `ingest.py --sprites-only` (names and registers them), then `--extra-forms-only`; current `main.py` |
 | An older-generation lookup says a Pokémon learns a move that didn't exist then, or its method counts are huge | Older `main.py` read the learnsets table without `source_gen` (every generation stores the full source list) | Current `main.py`; no re-ingest needed |
 | A script that restarts a container and immediately runs a command against it fails with "Connection refused" or "Connection reset by peer" | `docker restart` returns as soon as the restart is *initiated*, not once the process inside has actually finished starting and bound its port — a command that follows immediately can beat it | Add a short sleep, poll the container's `/health` until it responds, or just retry the failed command once the container's had a few seconds |
 | Model answers Pokémon questions without calling tools | Tool parsing not enabled on the model server | Step 3.6. vLLM needs `--enable-auto-tool-choice --tool-call-parser`; llama.cpp and lemonade need `--jinja` |
@@ -2738,6 +2759,7 @@ scarce.
 | `fetch-pikalytics.py` | anywhere with internet | Pikalytics downloader (Step 2e, optional) |
 | `<format>-<cutoff>-<YYYY-MM>.json` | `/mnt/Apps/pokedex/pikalytics/` | Champions usage snapshots written by the fetcher |
 | `sprite_dump.py` | copy into the container when needed | Read-only diagnostic for the sprite pipeline (Step 2b) |
+| `tests/sprite_pipeline_test.py`, `tests/extra_forms_test.py`, `tests/lookup_visual_forms_test.py` | beside `ingest.py` and `main.py` (no database needed) | Regression tests that run the real matcher, sprite stage, extra-forms stage and `/lookup` on synthetic data: `python3 tests/sprite_pipeline_test.py` |
 
 ---
 
