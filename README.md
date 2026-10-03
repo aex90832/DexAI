@@ -11,14 +11,16 @@ whatever the model hallucinates. Supports desktop and mobile.
 
 **Note:** DexAI is an unofficial, non-commercial fan project. Not affiliated with Nintendo or The Pokémon Company. See [Disclaimer & License](#license--disclaimer) below.
 
-<img width="1539" height="916" alt="Dex1" src="https://github.com/user-attachments/assets/bd174669-99a2-4091-ad28-f862d15cbc4a" />
-<img width="1546" height="919" alt="Dex2" src="https://github.com/user-attachments/assets/c94f3968-8938-4195-a606-c3164da4b4c6" />
-<img width="1540" height="921" alt="Dex5" src="https://github.com/user-attachments/assets/2130d700-445e-4589-97e9-8fffabd75c30" />
-<img width="1539" height="916" alt="Dex6" src="https://github.com/user-attachments/assets/9b4b59f9-28a3-4635-8b70-9816736fb70a" />
-<div align="center">
-<img width="773" height="461" alt="Dex3" src="https://github.com/user-attachments/assets/79d0386f-4c6e-43ba-ac7e-d244bcb0b323" />
-</div>
-<img width="1533" height="919" alt="Dex4" src="https://github.com/user-attachments/assets/4a3092bf-8c41-475c-98aa-f801cd6336ec" />
+
+<img width="959" height="471" alt="DexAI-00" src="https://github.com/user-attachments/assets/7053fb08-84b8-4aed-9e4b-fa405645c82e" />
+<img width="955" height="464" alt="DexAI-01" src="https://github.com/user-attachments/assets/35c11620-b940-449f-977f-a43f0e56d5eb" />
+<img width="959" height="500" alt="DexAI-02" src="https://github.com/user-attachments/assets/a9f8d6e0-c0c5-428d-974c-2745812374fe" />
+<img width="959" height="469" alt="DexAI-03" src="https://github.com/user-attachments/assets/e19dcffc-bb82-437d-a9d5-dfd915e92f10" />
+<img width="956" height="469" alt="DexAI-04" src="https://github.com/user-attachments/assets/c7b34755-cb64-4129-9b39-66f15e4e78f9" />
+<img width="952" height="472" alt="DexAI-05" src="https://github.com/user-attachments/assets/58cf45af-8dda-45d2-9f23-69259ab38c45" />
+<img width="954" height="469" alt="DexAI-06" src="https://github.com/user-attachments/assets/ba7c55a7-b86d-47bb-8ea4-092458c296ce" />
+<img width="950" height="470" alt="DexAI-07" src="https://github.com/user-attachments/assets/e4d77997-6394-40d3-a4f2-17d6ddbcf5ab" />
+
 
 This started from having my son and nephew asking me tons of questions as they have gotten into competitive Pokemon battles together. It was also an chance to get better ad coding and see what can be done with self hosted AI.
 
