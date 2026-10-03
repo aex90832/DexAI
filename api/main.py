@@ -228,7 +228,11 @@ def species_sprite(c: sqlite3.Connection, num: int, forme: str | None,
     """
     is_shiny = 1 if shiny else 0
     if forme:
-        where, params = "natdex=? AND forme_name=? AND is_shiny=?", (num, full_name, is_shiny)
+        # A Gigantamax row shares its form number — and, for Urshifu's Rapid Strike, its label —
+        # with the ordinary form, so a name lookup must say which it wants: only a "-Gmax" name
+        # gets Gigantamax rows, and no other name ever does.
+        where, params = ("natdex=? AND forme_name=? AND is_shiny=? AND is_gmax=?",
+                         (num, full_name, is_shiny, 1 if full_name.endswith("-Gmax") else 0))
     else:
         where, params = ("natdex=? AND form_index=0 AND is_gmax=0 AND is_shiny=?",
                          (num, is_shiny))
@@ -1024,10 +1028,19 @@ def lookup(req: LookupRequest):
                 out["id"], out["name"] = visual["form_id"], visual["form_name"]
                 out["visual_only"] = True
                 out["visual_form_of"] = r["name"]
-                out["visual_form_note"] = (
-                    f"{visual['form_name']} is purely a visual form of {r['name']}: every stat, "
-                    f"type, ability, move and evolution detail here is identical to {r['name']}'s. "
-                    f"Only its appearance differs.")
+                if visual["form_name"].endswith("-Gmax"):
+                    out["visual_kind"] = "gigantamax"
+                    out["visual_form_note"] = (
+                        f"{visual['form_name']} is the Gigantamax form of {r['name']}: every stat, "
+                        f"type, ability, move and evolution detail here is {r['name']}'s. "
+                        f"Gigantamax is a temporary Generation 8 battle form; only its appearance, "
+                        f"and the G-Max move it can use in battle, differ.")
+                else:
+                    out["visual_kind"] = "cosmetic"
+                    out["visual_form_note"] = (
+                        f"{visual['form_name']} is purely a visual form of {r['name']}: every stat, "
+                        f"type, ability, move and evolution detail here is identical to {r['name']}'s. "
+                        f"Only its appearance differs.")
             # These rows come from Bulbapedia, not @pkmn/dex — pokedex-sim's
             # real battle engine has no knowledge of them at all, since
             # nothing here touches its own data. tier carries the source's
@@ -1204,6 +1217,7 @@ def lookup(req: LookupRequest):
                         forms_list.extend(entries)
                     for f in entries:
                         f["visual_only"] = True
+                        f["visual_kind"] = "gigantamax" if v["form_name"].endswith("-Gmax") else "cosmetic"
                         if not f["is_shiny"] and not (f["icon_url"] or f["preview_url"]):
                             # the still is the base's; an animation of its own is kept
                             f["icon_url"], f["preview_url"] = b_icon, b_prev
@@ -3399,3 +3413,4 @@ async def chat(req: ChatRequest):
 
     return StreamingResponse(gen(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
