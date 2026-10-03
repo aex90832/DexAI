@@ -1237,7 +1237,7 @@ def _match_animated_form(form_slug: str, formes: list[str]) -> int | None:
     species ('mega-x'/'mega-y' -> Charizard-Mega-X/-Y specifically), a
     regional form ('alola' -> Rattata-Alola), and the word-order case above.
     """
-    needle = set(t for t in form_slug.split("-") if t)
+    needle = set(t.lower() for t in re.split(r"[-\s]+", form_slug) if t)
     if not needle:
         return None
     # The TIGHTEST match wins (fewest tokens; ties keep list order), not simply the first.
@@ -1249,7 +1249,7 @@ def _match_animated_form(form_slug: str, formes: list[str]) -> int | None:
     for i, forme in enumerate(formes):
         if not forme:               # a number HOME skips (see HOME_FORME_ORDER_OVERRIDES)
             continue
-        forme_tokens = set(t.lower() for t in forme.split("-") if t)
+        forme_tokens = set(t.lower() for t in re.split(r"[-\s]+", forme) if t)
         if needle <= forme_tokens and (best_n is None or len(forme_tokens) < best_n):
             best_i, best_n = i, len(forme_tokens)
     return best_i + 1 if best_i is not None else None
@@ -1643,14 +1643,24 @@ CONFIRMED_FORM_INDEX_OVERRIDES: dict[tuple[int, int], str] = {
 HOME_FORME_ORDER_OVERRIDES: dict[int, list] = {
     25: ["Pikachu-Original", "Pikachu-Hoenn", "Pikachu-Sinnoh", "Pikachu-Unova", "Pikachu-Kalos",
          "Pikachu-Alola", "Pikachu-Partner", None, "Pikachu-World"],
+    # Vivillon, AFTER the 0<->6 swap in HOME_FORM_REMAP (position N is form N+1): form 0 is Meadow,
+    # the base, so it has no entry here; Icy Snow sits at 6 where Meadow used to be. The simulator
+    # knows only Fancy and Pokeball, which it would have put at forms 1 and 2 — the wrong pictures.
+    666: ["Vivillon-Polar", "Vivillon-Tundra", "Vivillon-Continental", "Vivillon-Garden",
+          "Vivillon-Elegant", "Vivillon-Icy Snow", "Vivillon-Modern", "Vivillon-Marine",
+          "Vivillon-Archipelago", "Vivillon-High Plains", "Vivillon-Sandstorm", "Vivillon-River",
+          "Vivillon-Monsoon", "Vivillon-Savanna", "Vivillon-Sun", "Vivillon-Ocean",
+          "Vivillon-Jungle", "Vivillon-Fancy", "Vivillon-Pokeball"],
 }
 
 # Species whose HOME form 0 is NOT the look the dex should default to. {dex: {old form_index: new}} —
 # rows are renumbered right after the static scan, before anything is labeled or matched.
-# Currently empty. Minior was here briefly (swapping the Meteor Form and the Red Core so the Core
-# was the default), but the Meteor Form IS HOME's form 0 and the in-game default, so it stays
-# there — see BASE_FORM_ALSO_NAMED.
-HOME_FORM_REMAP: dict[int, dict[int, int]] = {}
+#   Vivillon: HOME numbers its 20 patterns in the game's own list order, so form 0 is ICY SNOW and
+#   Meadow — the species' real base pattern and the dex default — is form 6. Swapping 0 and 6 makes
+#   Meadow the base and puts Icy Snow at 6; every other number is unchanged. Confirmed against the
+#   images. (Minior was tried here and reverted: its form 0, the Meteor Form, IS the default —
+#   see BASE_FORM_ALSO_NAMED.)
+HOME_FORM_REMAP: dict[int, dict[int, int]] = {666: {0: 6, 6: 0}}
 
 # Forms with no shiny still of their own that share another form's. {dex: (source form, [forms])}.
 #   Minior: every Core colour shares ONE shiny look, HOME's "Shiny Core" — the shiny of 007, the
@@ -1664,7 +1674,7 @@ SHARED_SHINY_STILL: dict[int, tuple[str, list[str]]] = {
 # form-0 rows are copied under that name so the named species resolves to the same picture.
 #   Minior-Meteor: HOME's form 0 is the Meteor Form; the simulator calls the Core "Minior" and
 #   the Meteor "Minior-Meteor". Both are right — one picture serves the dex default and the name.
-BASE_FORM_ALSO_NAMED: dict[int, list[str]] = {774: ["Minior-Meteor"]}
+BASE_FORM_ALSO_NAMED: dict[int, list[str]] = {774: ["Minior-Meteor"], 666: ["Vivillon-Meadow"]}
 BASE_ALIAS_FORM_INDEX_BASE = 250
 
 # Animated slugs that name a form the species table has under a plainer name. Tatsugiri's
@@ -1678,6 +1688,9 @@ ANIMATED_SLUG_SYNONYMS: dict[tuple[int, str], str] = {
     (25, "original-cap"): "original", (25, "hoenn-cap"): "hoenn", (25, "sinnoh-cap"): "sinnoh",
     (25, "unova-cap"): "unova", (25, "kalos-cap"): "kalos", (25, "alola-cap"): "alola",
     (25, "partner-cap"): "partner",
+    # Vivillon: the archive spells the Poke Ball pattern "poke-ball" (two words) where the form is
+    # named "Vivillon-Pokeball" (one). Confirmed against the real file names.
+    (666, "poke-ball"): "pokeball",
 }
 
 # One Mega with several forms that share its stats. Bulbapedia (and every other source
@@ -1693,6 +1706,10 @@ ZA_MEGA_FORM_VARIANTS: dict[str, list[str]] = {
 # the real sprite instead of to nothing. Confirmed against the images, not inferred.
 CONFIRMED_SAME_FORM: dict[tuple[int, str], list[str]] = {
     (658, "Greninja-Ash"): ["Greninja-Bond"],
+    # Toxtricity: HOME has ONE Gigantamax sprite (form 000, category "g"); 001 is simply the ordinary
+    # Low Key form. The simulator has two Gigantamax names, so the one sprite serves both: the copy
+    # keeps its Gigantamax flag, and registers as a visual-style form of Toxtricity-Low-Key.
+    (849, "Toxtricity-Gmax"): ["Toxtricity-Low-Key-Gmax"],
 }
 # Copies live at their own form_index so they can never collide with a real HOME form or
 # with the 101+ range the Z-A Megas use.
@@ -2111,6 +2128,15 @@ VISUAL_ONLY_FORMES: dict[str, str] = {
     # Minior's core colours. The Meteor form is NOT here: it has different stats, so it is a real form.
     "Minior-Red": "Minior", "Minior-Orange": "Minior", "Minior-Yellow": "Minior", "Minior-Green": "Minior",
     "Minior-Blue": "Minior", "Minior-Indigo": "Minior", "Minior-Violet": "Minior",
+    # Vivillon's twenty patterns — purely cosmetic. Meadow is the base itself; it is listed so the
+    # name resolves and shows as an alternate form.
+    "Vivillon-Meadow": "Vivillon", "Vivillon-Icy Snow": "Vivillon", "Vivillon-Polar": "Vivillon",
+    "Vivillon-Tundra": "Vivillon", "Vivillon-Continental": "Vivillon", "Vivillon-Garden": "Vivillon",
+    "Vivillon-Elegant": "Vivillon", "Vivillon-Modern": "Vivillon", "Vivillon-Marine": "Vivillon",
+    "Vivillon-Archipelago": "Vivillon", "Vivillon-High Plains": "Vivillon",
+    "Vivillon-Sandstorm": "Vivillon", "Vivillon-River": "Vivillon", "Vivillon-Monsoon": "Vivillon",
+    "Vivillon-Savanna": "Vivillon", "Vivillon-Sun": "Vivillon", "Vivillon-Ocean": "Vivillon",
+    "Vivillon-Jungle": "Vivillon", "Vivillon-Fancy": "Vivillon", "Vivillon-Pokeball": "Vivillon",
 }
 
 
@@ -2167,6 +2193,8 @@ def stage_extra_forms(db: sqlite3.Connection) -> None:
         registered += 1
     log(f"  {registered} visual-only forms registered" +
         (f"; skipped (base species missing): {skipped}" if skipped else ""))
+    log(f"  {_register_gmax_visual_forms(db)} Gigantamax forms registered from the sprite table "
+        f"(base species' data, their own pictures)")
 
     # --- advisory: forms whose data is identical to their base's --------------------------
     registered_ids = {norm(n) for n in VISUAL_ONLY_FORMES}
@@ -2659,6 +2687,38 @@ def _absorb_static_rows(entries: dict, target_key: tuple, static_keys: list) -> 
     del entries[target_key]
 
 
+def _register_gmax_visual_forms(db: sqlite3.Connection) -> int:
+    """
+    Register every Gigantamax sprite as a visual-style form of the form it belongs to, derived
+    from the sprite table rather than a hand-written list: a row named "<form>-Gmax" becomes a
+    form of "<form>" (Charizard-Gmax of Charizard, Urshifu-Rapid-Strike-Gmax of
+    Urshifu-Rapid-Strike), so a click answers with the base's data and the Gmax form's own
+    pictures. Called at the end of the sprite stage AND by the extra-forms stage (which clears
+    and rebuilds the registry), so it holds whichever of the two ran last. Returns how many.
+    """
+    try:
+        rows = db.execute("SELECT DISTINCT natdex, forme_name FROM home_sprites "
+                          "WHERE is_gmax=1 AND forme_name LIKE '%-Gmax'").fetchall()
+    except sqlite3.OperationalError:
+        return 0
+    n = 0
+    for r in rows:
+        name = r["forme_name"]
+        base_id = norm(name[:-len("-Gmax")])
+        if not db.execute("SELECT 1 FROM species WHERE id=? LIMIT 1", (base_id,)).fetchone():
+            continue
+        fid = norm(name)
+        try:
+            db.execute("INSERT OR REPLACE INTO visual_forms (form_id, form_name, base_id, natdex) "
+                       "VALUES (?, ?, ?, ?)", (fid, name, base_id, r["natdex"]))
+            db.execute("INSERT OR REPLACE INTO aliases (alias_norm, alias, canonical_id, kind, source) "
+                       "VALUES (?, ?, ?, 'species', 'visual_forms')", (fid, name, fid))
+        except sqlite3.OperationalError:       # a database from before the visual_forms table
+            return n
+        n += 1
+    return n
+
+
 def stage_home_sprites(db: sqlite3.Connection) -> None:
     """
     Catalog Pokemon HOME sprite/preview images from two local folders, plus
@@ -2807,7 +2867,10 @@ def stage_home_sprites(db: sqlite3.Connection) -> None:
     # Read from the constant plus the species table rather than the visual_forms table, so this
     # stage does not depend on --extra-forms-only having run first.
     visual_formes: dict[int, list[str]] = {}
+    _copies = {n for names in BASE_FORM_ALSO_NAMED.values() for n in names}
     for _vname, _vbase in VISUAL_ONLY_FORMES.items():
+        if _vname in _copies:       # its picture is a copy of the default form's (BASE_FORM_ALSO_NAMED)
+            continue
         _vrow = db.execute("SELECT num FROM species WHERE id=? LIMIT 1", (norm(_vbase),)).fetchone()
         if _vrow:
             visual_formes.setdefault(_vrow["num"], []).append(_vname)
@@ -2915,6 +2978,29 @@ def stage_home_sprites(db: sqlite3.Connection) -> None:
         if 0 <= idx < len(formes) and formes[idx]:
             row["forme_name"] = formes[idx]
             labeled += 1
+
+        # Gigantamax rows. HOME files a Gigantamax sprite under the SAME form number as the form it
+    # belongs to (form 0 for almost all of them), told apart only by the "g" category, so the form
+    # order gives them no name — and Urshifu's Rapid Strike Gigantamax row even picked up the
+    # ordinary Rapid Strike label, indistinguishable from it by name. Name every one
+    # "<form>-Gmax": Charizard-Gmax, Urshifu-Gmax, Urshifu-Rapid-Strike-Gmax.
+    base_name_cache: dict[int, str | None] = {}
+    gmax_named = 0
+    for row in entries.values():
+        if not row["is_gmax"]:
+            continue
+        label = row["forme_name"]
+        if not label:
+            n_ = row["natdex"]
+            if n_ not in base_name_cache:
+                b_ = db.execute("SELECT name FROM species WHERE num=? AND forme IS NULL LIMIT 1", (n_,)).fetchone()
+                base_name_cache[n_] = b_["name"] if b_ else None
+            label = base_name_cache[n_]
+        if label:
+            row["forme_name"] = f"{label}-Gmax"
+            gmax_named += 1
+    if gmax_named:
+        log(f"  {gmax_named} Gigantamax rows named \"<form>-Gmax\"")
 
     # Merge each labeled-but-imageless row with any real, unlabeled static
     # sprite for the SAME (natdex, is_shiny) — the same underlying problem
@@ -3113,6 +3199,10 @@ def stage_home_sprites(db: sqlite3.Connection) -> None:
         f"{za_merged} rows merged by heuristic, {override_merged} merged via confirmed override, "
         f"{override_labeled} labeled in place, "
         f"{shared_forms} rows shared between Showdown names for one HOME form)")
+    n_gmax = _register_gmax_visual_forms(db)
+    if n_gmax:
+        log(f"  {n_gmax} Gigantamax forms registered as visual-style forms of their base")
+    db.commit()
     set_meta(db, "home_sprites_ingested_at",
              time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
 
